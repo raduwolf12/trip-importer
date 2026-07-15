@@ -440,7 +440,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.3 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.4 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -722,7 +722,19 @@ module.exports = definePlugin({
               rangeEnd = rangeEnd || tripInfo?.end_date || null
             } catch (_e) {}
           }
-          if (!rangeStart || !rangeEnd) {
+          {
+            // The trip's own declared start/end (from tripConfig, Polarsteps, or an existing
+            // trip record) is NOT guaranteed to cover every date actually present in the
+            // imported data — GPS photos and Google Timeline points routinely fall just outside
+            // a Polarsteps-reported window (a travel day before/after the recorded trip, a
+            // timezone-edge date). A place dated outside the created day-row range has nowhere
+            // to be assigned: dayMap[cluster.date] is undefined and itinerary.assign silently
+            // no-ops, so the place is created but never lands on the itinerary. Confirmed as
+            // the actual cause of "places aren't added to days" even for single, valid dates —
+            // not just the multi-visit clustering issue fixed separately in
+            // clusterByProximity(). So rather than only falling back to the data's own span
+            // when the trip has NO declared range at all, always EXTEND rangeStart/rangeEnd to
+            // cover whatever the imported data spans, on top of whatever's already known.
             // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a single
             // malformed date (e.g. a raw un-normalized CSV cell, or a stray non-date string)
             // sorts unpredictably against real ISO dates and can silently produce a garbage
@@ -739,7 +751,10 @@ module.exports = definePlugin({
             }
             for (const e of (expenses || [])) if (isoDateRe.test(e.date)) allDates.push(e.date)
             allDates.sort()
-            if (allDates.length) { rangeStart = rangeStart || allDates[0]; rangeEnd = rangeEnd || allDates[allDates.length - 1] }
+            if (allDates.length) {
+              if (!rangeStart || allDates[0] < rangeStart) rangeStart = allDates[0]
+              if (!rangeEnd || allDates[allDates.length - 1] > rangeEnd) rangeEnd = allDates[allDates.length - 1]
+            }
           }
 
           // Sanity cap: the data-derived fallback above takes the min/max of every date across
