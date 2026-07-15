@@ -76,12 +76,23 @@ function haversine(lat1, lng1, lat2, lng2) {
 }
 
 // ── Cluster GPS points within radius into groups ──────────────────────────────
+// Proximity alone isn't enough to merge two points into one place: a landmark or hotel
+// revisited on different days must stay assignable to each of those days, not collapse into
+// one place tied to whichever visit happened to be processed first. So a merge also requires
+// the dates to agree — unless one side has no date at all, in which case it can still join
+// (nothing to conflict with), and the cluster adopts that date if it didn't have one yet.
+// Confirmed as the cause of places silently never landing on a day: /parse-timeline clusters
+// a trip's ENTIRE location history in one pass (no per-day bucketing, unlike /parse-gps), so
+// any place visited more than once was already collapsing to a single date before this fix —
+// and even for GPS-only imports, a cluster whose first-processed member had no EXIF date used
+// to stay dateless forever regardless of how many dated members merged into it afterward.
 function clusterByProximity(places, radiusMetres = 800) {
   const clusters = []
   for (const p of places) {
-    const match = clusters.find(c => haversine(c.lat, c.lng, p.lat, p.lng) < radiusMetres)
+    const match = clusters.find(c => haversine(c.lat, c.lng, p.lat, p.lng) < radiusMetres && (!c.date || !p.date || c.date === p.date))
     if (match) {
       match.members.push(p)
+      if (!match.date && p.date) match.date = p.date
       // Update centroid
       match.lat = match.members.reduce((s, m) => s + m.lat, 0) / match.members.length
       match.lng = match.members.reduce((s, m) => s + m.lng, 0) / match.members.length
@@ -429,7 +440,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.2 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.3 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
