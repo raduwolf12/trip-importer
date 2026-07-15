@@ -15,6 +15,32 @@ function unixToDate(ts) {
   return new Date(ts * 1000).toISOString().slice(0, 10)
 }
 
+// Normalize a loose date string (various separators/field orders, as found in expense CSVs)
+// to YYYY-MM-DD, or null if it can't be parsed. Mirrors the disambiguation already used for
+// booking-text date extraction below: a 4-digit first field is YYYY-MM-DD; a 4-digit last
+// field assumes day-first (this plugin's exports skew European); a 2-digit last field assumes
+// day-first with a 20xx century. Left un-normalized, a raw CSV date string ("16/07/2026")
+// sorted alongside proper ISO dates from other sources produces a garbage min/max — confirmed
+// as the cause of trip date auto-detection silently failing once an expense CSV was added
+// (an <input type="date"> silently ignores a non-ISO string, leaving the field blank).
+function normalizeDateStr(raw) {
+  if (!raw) return null
+  const s = String(raw).trim()
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (iso) return iso[1]
+  const m = s.match(/^(\d{1,4})[-./](\d{1,2})[-./](\d{1,4})$/)
+  if (!m) return null
+  const [, p1, p2, p3] = m
+  let y, mo, d
+  if (p1.length === 4) { y = p1; mo = p2; d = p3 }
+  else if (p3.length === 4) { d = p1; mo = p2; y = p3 }
+  else if (p3.length === 2) { d = p1; mo = p2; y = '20' + p3 }
+  else return null
+  mo = mo.padStart(2, '0'); d = d.padStart(2, '0')
+  if (+mo < 1 || +mo > 12 || +d < 1 || +d > 31) return null
+  return y + '-' + mo + '-' + d
+}
+
 // ── Nominatim reverse geocode ─────────────────────────────────────────────────
 async function reverseGeocode(lat, lng) {
   try {
@@ -403,7 +429,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.2 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -498,12 +524,18 @@ module.exports = definePlugin({
           // with photos from 3 different attractions produced 1 "place" roughly between them. Cluster
           // by proximity WITHIN each day first (same radius as parse-timeline), so a day only becomes
           // one place if its photos were actually all taken near each other.
+          // 'unknown' above is only a grouping key for photos with no EXIF date — it must never
+          // leak into the place's own `date` field. It's not a valid YYYY-MM-DD, and downstream
+          // consumers (the client's date-auto-detect fallback, /import's date-range fallback,
+          // both of which sort raw date strings to find a min/max) would otherwise treat the
+          // literal string "unknown" as sorting after every real date and wrongly pick it as
+          // the trip's end date.
           const places = []
           for (const [date, pts] of Object.entries(byDate)) {
             const clusters = clusterByProximity(pts, 500)
             for (const c of clusters) {
               places.push({
-                date,
+                date: date === 'unknown' ? null : date,
                 lat: c.lat,
                 lng: c.lng,
                 photoCount: c.members.length,
@@ -511,7 +543,7 @@ module.exports = definePlugin({
               })
             }
           }
-          places.sort((a, b) => a.date.localeCompare(b.date))
+          places.sort((a, b) => (a.date || '').localeCompare(b.date || ''))
           return { places, totalPhotos: photos.length }
         })
         return safeJson(200, result)
@@ -588,7 +620,7 @@ module.exports = definePlugin({
 
             expenses.push({
               _id: 'e' + i,
-              date: dateCol >= 0 ? cols[dateCol] || null : null,
+              date: dateCol >= 0 ? normalizeDateStr(cols[dateCol]) : null,
               name: name || ('Expense ' + i),
               amount: Math.abs(amt), // always positive
               currency: currCol >= 0 ? (cols[currCol] || '').toUpperCase().slice(0, 3) || null : null,
@@ -680,12 +712,21 @@ module.exports = definePlugin({
             } catch (_e) {}
           }
           if (!rangeStart || !rangeEnd) {
+            // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a single
+            // malformed date (e.g. a raw un-normalized CSV cell, or a stray non-date string)
+            // sorts unpredictably against real ISO dates and can silently produce a garbage
+            // range. All sources below are expected to already emit ISO or null, but this
+            // filter is cheap insurance against any that don't.
+            const isoDateRe = /^\d{4}-\d{2}-\d{2}$/
             const allDates = []
-            for (const s of steps) if (s.date) allDates.push(s.date)
-            for (const c of (gpsPlaces || [])) if (c.date) allDates.push(c.date)
-            for (const c of (timelinePlaces || [])) if (c.date) allDates.push(c.date)
-            for (const b of (bookings || [])) { if (b.from_date) allDates.push(b.from_date); if (b.to_date) allDates.push(b.to_date) }
-            for (const e of (expenses || [])) if (e.date) allDates.push(e.date)
+            for (const s of steps) if (isoDateRe.test(s.date)) allDates.push(s.date)
+            for (const c of (gpsPlaces || [])) if (isoDateRe.test(c.date)) allDates.push(c.date)
+            for (const c of (timelinePlaces || [])) if (isoDateRe.test(c.date)) allDates.push(c.date)
+            for (const b of (bookings || [])) {
+              if (isoDateRe.test(b.from_date)) allDates.push(b.from_date)
+              if (isoDateRe.test(b.to_date)) allDates.push(b.to_date)
+            }
+            for (const e of (expenses || [])) if (isoDateRe.test(e.date)) allDates.push(e.date)
             allDates.sort()
             if (allDates.length) { rangeStart = rangeStart || allDates[0]; rangeEnd = rangeEnd || allDates[allDates.length - 1] }
           }

@@ -864,6 +864,7 @@ select.field-input{cursor:pointer;}
         <div class="field-wrap"><label>Start date</label><input type="date" class="field-input" id="trip-start"/></div>
         <div class="field-wrap"><label>End date</label><input type="date" class="field-input" id="trip-end"/></div>
       </div>
+      <div id="date-detect-hint" style="display:none;font-size:11px;color:var(--text-faint);padding-top:2px;"></div>
     </div>
     <div id="existing-trip-fields" style="display:none;">
       <div class="field-wrap"><label>Select trip</label>
@@ -1245,6 +1246,35 @@ async function prepareStep3(){
   if(suggested&&!document.getElementById('trip-title').value)document.getElementById('trip-title').value=suggested;
   if(parsed.polarsteps?.startDate)document.getElementById('trip-start').value=parsed.polarsteps.startDate;
   if(parsed.polarsteps?.endDate)document.getElementById('trip-end').value=parsed.polarsteps.endDate;
+
+  // No Polarsteps trip.json means no authoritative start/end date, and a brand-new trip
+  // would otherwise get created with null dates (see server/index.js's own /import fallback,
+  // which does the same min/max-across-sources trick but only to size day-row creation, not
+  // to fill in the trip's own start_date/end_date). Fall back to the earliest/latest date
+  // found across every other imported source so the fields aren't left blank.
+  var startEl=document.getElementById('trip-start'),endEl=document.getElementById('trip-end');
+  var dateHint=document.getElementById('date-detect-hint');
+  if(!parsed.polarsteps?.startDate&&!startEl.value&&!endEl.value){
+    // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a stray malformed
+    // date (e.g. a source that isn't fully ISO-normalized) sorts unpredictably against real
+    // ISO dates and can silently pick a garbage min/max, which <input type="date"> then
+    // rejects on assignment, leaving the field blank (the bug where adding more sources on
+    // top of a working booking-only import broke date detection instead of improving it).
+    var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
+    var allDates=[];
+    parsed.bookings.forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
+    parsed.gpsPlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+    parsed.timelinePlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+    parsed.expenses.forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+    allDates.sort();
+    if(allDates.length){
+      startEl.value=allDates[0];endEl.value=allDates[allDates.length-1];
+      if(dateHint){
+        dateHint.textContent='📅 No Polarsteps trip found — dates auto-detected from '+allDates.length+' date'+(allDates.length===1?'':'s')+' across your bookings/photos/expenses. Double-check before importing.';
+        dateHint.style.display='';
+      }
+    }
+  }else if(dateHint){dateHint.style.display='none';}
 
   // Dim options that have no data
   setOptAvail('opt-journal-wrap',!!parsed.polarsteps);
