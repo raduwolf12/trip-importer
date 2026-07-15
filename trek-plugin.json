@@ -1,0 +1,31 @@
+{
+  "id": "trip-importer",
+  "name": "Trip Importer",
+  "version": "1.6.0",
+  "apiVersion": 1,
+  "type": "page",
+  "trek": ">=3.3.0 <4.0.0",
+  "author": "self-hosted",
+  "description": "Reconstruct a complete past trip from Polarsteps exports, booking PDFs, GPS photos, expense CSVs and Google Maps timeline. Creates the trip, journal, places, day notes, transports, accommodations and costs automatically.",
+  "icon": "PackageOpen",
+  "license": "MIT",
+  "nativeModules": false,
+  "permissions": [
+    "db:read:trips",
+    "db:create:trips",
+    "db:write:journal",
+    "db:write:places",
+    "db:write:reservations",
+    "db:write:accommodations",
+    "db:write:costs",
+    "db:write:files",
+    "db:write:daynotes",
+    "db:read:daynotes",
+    "db:meta",
+    "ai:invoke",
+    "http:outbound:nominatim.openstreetmap.org"
+  ],
+  "egress": [
+    "nominatim.openstreetmap.org"
+  ]
+}
