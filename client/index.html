@@ -828,7 +828,7 @@ select.field-input{cursor:pointer;}
       <span class="fpill">Google Maps Timeline JSON</span>
     </div>
   </div>
-  <input type="file" id="fi" multiple accept=".zip,.json,.pdf,.txt,.eml,.jpg,.jpeg,.png,.csv,.tsv,.xlsx" style="display:none"/>
+  <input type="file" id="fi" multiple accept=".zip,.json,.pdf,.txt,.eml,.jpg,.jpeg,.png,.csv,.tsv,.xlsx,.gpx,.kml,.kmz,.ics" style="display:none"/>
   <div id="st1-status" class="st" style="display:none;"></div>
   <div class="btn-row">
     <button class="btn-p" id="analyze-btn" onclick="doAnalyze()">
@@ -851,8 +851,8 @@ select.field-input{cursor:pointer;}
 
 <!-- Step 3: Configure -->
 <div id="step-3" style="display:none;">
-  <!-- Trip -->
-  <div style="margin-bottom:16px;">
+  <!-- Trip (single target — 0 or 1 journey selected, no leftover) -->
+  <div id="single-trip-config" style="margin-bottom:16px;">
     <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">Trip</div>
     <div class="trip-mode-row">
       <button class="tmode-btn active" id="tm-new" onclick="setTripMode('new')">Create new trip</button>
@@ -871,6 +871,12 @@ select.field-input{cursor:pointer;}
         <select class="field-input" id="trip-select" data-trek-native><option value="">— select —</option></select>
       </div>
     </div>
+  </div>
+  <!-- Trips (batch — 2+ targets: multiple selected journeys and/or a flagged leftover bucket) -->
+  <div id="multi-trip-config" style="display:none;margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:4px;">Trips</div>
+    <div style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">Each selected journey becomes its own trip, scoped to its own dates.</div>
+    <div id="trip-targets-list"></div>
   </div>
   <!-- What to import -->
   <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">What to import</div>
@@ -928,16 +934,27 @@ select.field-input{cursor:pointer;}
   <div id="prog-content"></div>
   <div class="btn-row" id="done-row" style="display:none;">
     <button class="btn-p" onclick="resetAll()">Import another trip</button>
+    <button class="btn-s" id="undo-import-btn" style="display:none;" onclick="doUndoImport()">Undo this import</button>
   </div>
 </div>
 </div>
 
 <script>
-var pending={},seq=0;
+var pending={},pendingConfirms={},seq=0;
 function invoke(path,method,body){
   return new Promise(function(res,rej){
     var id='r'+(++seq);pending[id]={resolve:res,reject:rej};
     window.parent.postMessage({type:'trek:invoke',requestId:id,sub:path,method:method||'GET',body:body},'*');
+  });
+}
+// The sandboxed frame has no allow-modals, so plain confirm()/alert() are no-ops in the real
+// host (only in an unsandboxed dev preview) — ask the host to render its native confirm instead.
+function trekConfirm(message,opts){
+  opts=opts||{};
+  var id='c'+(++seq);
+  return new Promise(function(resolve){
+    pendingConfirms[id]=resolve;
+    window.parent.postMessage({type:'trek:confirm',requestId:id,title:opts.title,message:message,confirmLabel:opts.confirmLabel,cancelLabel:opts.cancelLabel,danger:opts.danger!==false},'*');
   });
 }
 window.addEventListener('message',function(e){
@@ -945,12 +962,14 @@ window.addEventListener('message',function(e){
   if(m.type==='trek:context')onCtx(m);
   else if(m.type==='trek:response'){var p=pending[m.requestId];if(p){delete pending[m.requestId];p.resolve(m.data);}}
   else if(m.type==='trek:error'){var p2=pending[m.requestId];if(p2){delete pending[m.requestId];p2.reject(new Error(m.message||'err'));}}
+  else if(m.type==='trek:confirm:result'){var c=pendingConfirms[m.requestId];if(c){delete pendingConfirms[m.requestId];c(!!m.confirmed);}}
 });
 
 // ── State ──────────────────────────────────────────────────────────────────
 var files=[],imgFiles=[];
-var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[],bookingText:''};
+var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
 var tripMode='new';
+var tripTargets=[]; // computeTripTargets() result — the source of truth once step 3 is entered
 
 // ── Steps ──────────────────────────────────────────────────────────────────
 function goStep(n){
@@ -985,9 +1004,9 @@ async function doAnalyze(){
   if(!files.length){showSt1('Please drop some files first.','e');return;}
   var btn=document.getElementById('analyze-btn');btn.disabled=true;
   showSt1('Reading files…','');
-  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[],bookingText:''};
+  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
 
-  var zipFiles=[],jsonFiles=[],pdfFiles=[],txtFiles=[],csvFiles=[];
+  var zipFiles=[],jsonFiles=[],pdfFiles=[],txtFiles=[],csvFiles=[],gpxFiles=[],kmlFiles=[],kmzFiles=[],icsFiles=[];
   imgFiles=[]; // reset global
   files.forEach(function(f){
     var n=f.name.toLowerCase();
@@ -997,9 +1016,14 @@ async function doAnalyze(){
     else if(n.endsWith('.txt')||n.endsWith('.eml'))txtFiles.push(f);
     else if(n.endsWith('.jpg')||n.endsWith('.jpeg')||n.endsWith('.png'))imgFiles.push(f);
     else if(n.endsWith('.csv')||n.endsWith('.tsv'))csvFiles.push(f);
+    else if(n.endsWith('.gpx'))gpxFiles.push(f);
+    else if(n.endsWith('.kml'))kmlFiles.push(f);
+    else if(n.endsWith('.kmz'))kmzFiles.push(f);
+    else if(n.endsWith('.ics'))icsFiles.push(f);
   });
 
-  // 1. Process ZIPs — extract Polarsteps trip.json(s), photos, and timeline
+  // 1. Process ZIPs — extract Polarsteps trip.json(s), step photos, generic photos, and timeline
+  var stepPhotoEntries=[]; // {stepId, path, entry, name} across every zip — read into stepPhotosByStepId below
   for(var zf of zipFiles){
     try{
       showSt1('Extracting '+zf.name+'…','');
@@ -1014,24 +1038,47 @@ async function doAnalyze(){
         if(filename==='trip.json'&&parts.length<=5)tripJsonEntries.push({entry:entry,path:p});
         // Google Maps timeline
         if(filename==='location-history.json'||filename==='Records.json')jsonFiles.push({_entry:entry,name:filename,_isTimeline:true});
+        // Google Photos Takeout per-photo sidecar ("IMG_1234.jpg.json" next to "IMG_1234.jpg") —
+        // shape-checked (photoTakenTime+geoData) in the JSON loop below, this just gathers candidates.
+        if(/\.(jpe?g|png)\.json$/i.test(filename))jsonFiles.push({_entry:entry,name:filename,_isTakeoutSidecar:true});
         var ext=(filename.split('.').pop()||'').toLowerCase();
-        if(['jpg','jpeg','png'].includes(ext)&&!entry.dir)photoEntries.push({path:p,entry:entry,name:filename});
+        if(!['jpg','jpeg','png'].includes(ext)||entry.dir)return;
+        // Polarsteps has NO photo path field in trip.json at all — each step's media lives in a
+        // sibling folder named "<slug>_<stepId>/photos/*" (confirmed against the community
+        // polarsteps-data-parser project). These already have a known lat/lon from the step
+        // itself, so they're uploaded separately (attached to that step's place, post-import —
+        // see doImport()) rather than mixed into the generic EXIF/GPS-detection pipeline below.
+        var stepPhotoMatch=p.match(/\/[^\/]+_(\d+)\/photos\/[^\/]+$/i);
+        if(stepPhotoMatch){stepPhotoEntries.push({stepId:stepPhotoMatch[1],entry:entry,name:filename});return;}
+        photoEntries.push({path:p,entry:entry,name:filename});
       });
       // ALL Polarsteps trips in this ZIP
       for(var tje of tripJsonEntries){
         var txt=await tje.entry.async('text');
         jsonFiles.push({_text:txt,name:tje.path});
       }
-      // Collect photos
+      // Collect generic (non-step) photos
       for(var pe of photoEntries.slice(0,300)){
         var ab=await pe.entry.async('arraybuffer');
         imgFiles.push({_buffer:ab,name:pe.name,_fromZip:true});
       }
     }catch(e){console.error('ZIP error:',e);}
   }
+  // Read step photo bytes now (capped — a long trip can have hundreds); grouped by step id so
+  // doImport() can look up "this step's photos" once it knows that step's created placeId.
+  var stepPhotosByStepId={};
+  for(var spe of stepPhotoEntries.slice(0,500)){
+    try{
+      var spab=await spe.entry.async('arraybuffer');
+      (stepPhotosByStepId[spe.stepId]=stepPhotosByStepId[spe.stepId]||[]).push({_buffer:spab,name:spe.name});
+    }catch(_e){}
+  }
+  parsed._stepPhotosByStepId=stepPhotosByStepId; // read by doImport() after places are created
 
-  // 2. Process JSON files — Polarsteps (multiple) and Google Maps timeline
+  // 2. Process JSON files — Polarsteps (multiple), Google Maps timeline, and Google
+  //    Photos Takeout per-photo sidecars ("IMG_1234.jpg.json": photoTakenTime+geoData)
   var polarstepsList=[];
+  var takeoutPoints=[],takeoutCoveredNames={};
   for(var jf of jsonFiles){
     try{
       var text;
@@ -1046,6 +1093,22 @@ async function doAnalyze(){
           parsed.timelinePlaces=tlResult.places;
           console.log('[trip-importer] timeline places:', tlResult.places.length);
         }
+      } else if(jf._isTakeoutSidecar){
+        // Shape-check rather than trust the filename alone (Takeout's naming has several
+        // variants, e.g. "…supplemental-metadata.json") — a real sidecar has photoTakenTime
+        // + geoData/geoDataExif. Prefer this over the photo's own EXIF: Takeout sometimes
+        // re-encodes images and strips or rewrites their EXIF GPS.
+        try{
+          var tk=JSON.parse(text);
+          var geo=tk&&(tk.geoData||tk.geoDataExif);
+          if(tk&&tk.photoTakenTime&&tk.photoTakenTime.timestamp&&geo&&(geo.latitude||geo.longitude)){
+            var baseName=jf.name.replace(/\.json$/i,'');
+            var ts=parseInt(tk.photoTakenTime.timestamp,10);
+            var tkDate=ts?new Date(ts*1000).toISOString().slice(0,10):null;
+            takeoutPoints.push({name:baseName,lat:geo.latitude,lng:geo.longitude,date:tkDate});
+            takeoutCoveredNames[baseName.toLowerCase()]=true;
+          }
+        }catch(_e){}
       } else {
         // Try as Polarsteps trip.json
         var data=await invoke('/parse-polarsteps','POST',{json:text});
@@ -1055,28 +1118,94 @@ async function doAnalyze(){
       }
     }catch(e){console.warn('JSON parse error:',e);}
   }
-  // Use first Polarsteps trip (or show all if multiple — future: multi-select)
+  // Multiple Polarsteps journeys select ALL of them by default — the user deselects any they
+  // don't want in the step 2 preview (renderPolarstepsPreview). Each selected journey becomes
+  // its own trip at import time (computeTripTargets()), auto-scoped to its own dates — see
+  // the "Polarsteps multi-journey" note in CLAUDE.md.
   if(polarstepsList.length>0){
     parsed.polarsteps=polarstepsList[0];
     parsed.polarstepsAll=polarstepsList;
-    if(polarstepsList.length>1)console.log('[trip-importer] found',polarstepsList.length,'Polarsteps trips — using first');
+    parsed._selectedJourneyIdx=polarstepsList.map(function(_,i){return i;});
+    if(polarstepsList.length>1)console.log('[trip-importer] found',polarstepsList.length,'Polarsteps journeys');
   }
+  if(takeoutPoints.length)console.log('[trip-importer]',takeoutPoints.length,'Google Photos Takeout sidecar(s) with GPS found');
 
-  // 3. Extract GPS from photos
-  if(imgFiles.length>0){
-    showSt1('Reading GPS from '+imgFiles.length+' photos…','');
-    var gpsData=[],gpsNone=0;
-    for(var img of imgFiles){
+  // 3. Extract GPS from photos — Takeout sidecar data (if any, from step 2) wins over a
+  //    photo's own EXIF, so skip re-reading EXIF for any photo a sidecar already covered.
+  var gpsData=takeoutPoints.slice();
+  var imgFilesToScan=imgFiles.filter(function(img){return !takeoutCoveredNames[img.name.toLowerCase()];});
+  if(imgFilesToScan.length>0){
+    showSt1('Reading GPS from '+imgFilesToScan.length+' photos…','');
+    var gpsNone=0;
+    for(var img of imgFilesToScan){
       try{
         var buf=img._buffer||await readBuffer(img);
         var gps=await extractGPS(buf,img.name);
         if(gps)gpsData.push(gps);else gpsNone++;
       }catch(_e){gpsNone++;}
     }
-    if(gpsNone)console.log('[trip-importer]',gpsNone,'of',imgFiles.length,'photos had no usable GPS/EXIF data (e.g. screenshots) — skipped');
-    if(gpsData.length){
-      var gpsResult=await invoke('/parse-gps','POST',{photos:gpsData});
-      if(gpsResult&&gpsResult.places)parsed.gpsPlaces=gpsResult.places;
+    if(gpsNone)console.log('[trip-importer]',gpsNone,'of',imgFilesToScan.length,'photos had no usable GPS/EXIF data (e.g. screenshots) — skipped');
+  }
+  if(gpsData.length){
+    var gpsResult=await invoke('/parse-gps','POST',{photos:gpsData});
+    if(gpsResult&&gpsResult.places)parsed.gpsPlaces=gpsResult.places;
+  }
+  // Stamp each photo's own resolved date (EXIF or Takeout sidecar) back onto imgFiles itself —
+  // computeTripTargets() partitions the actual upload list by this, not just the gpsPlaces
+  // clusters, so a dropped photo's upload follows the same date-scoping as its GPS point.
+  var dateByPhotoName={};
+  gpsData.forEach(function(g){if(g.name)dateByPhotoName[g.name.toLowerCase()]=g.date;});
+  imgFiles.forEach(function(img){img._date=dateByPhotoName[img.name.toLowerCase()]||null;});
+
+  // 3b. GPX tracks/waypoints — parsed client-side (DOMParser; GPX is plain XML, no
+  //     vendored library needed), then clustered server-side via the same generic
+  //     points route KML uses.
+  for(var kmzf of kmzFiles){
+    try{
+      var kmzZip=await JSZip.loadAsync(kmzf);
+      var kmlEntry=null;
+      kmzZip.forEach(function(path,entry){if(!kmlEntry&&/\.kml$/i.test(path))kmlEntry=entry;});
+      if(kmlEntry){var kmlText=await kmlEntry.async('text');kmlFiles.push({_text:kmlText,name:kmzf.name});}
+    }catch(e){console.error('KMZ error:',e);}
+  }
+  if(gpxFiles.length){
+    showSt1('Reading '+gpxFiles.length+' GPX file'+(gpxFiles.length===1?'':'s')+'…','');
+    var gpxPoints=[];
+    for(var gf of gpxFiles){
+      try{var gt=await readText(gf);gpxPoints=gpxPoints.concat(parseGPXText(gt));}catch(_e){}
+    }
+    if(gpxPoints.length){
+      var gpxResult=await invoke('/parse-geo-points','POST',{points:gpxPoints});
+      if(gpxResult&&gpxResult.places)parsed.gpxPlaces=gpxResult.places;
+    }
+  }
+
+  // 3c. KML/KMZ placemarks
+  if(kmlFiles.length){
+    showSt1('Reading '+kmlFiles.length+' KML file'+(kmlFiles.length===1?'':'s')+'…','');
+    var kmlPoints=[];
+    for(var kf of kmlFiles){
+      try{var kt=kf._text||await readText(kf);kmlPoints=kmlPoints.concat(parseKMLText(kt));}catch(_e){}
+    }
+    if(kmlPoints.length){
+      var kmlResult=await invoke('/parse-geo-points','POST',{points:kmlPoints});
+      if(kmlResult&&kmlResult.places)parsed.kmlPlaces=kmlResult.places;
+    }
+  }
+
+  // 3d. ICS/iCalendar bookings — structured VEVENT fields, parsed server-side (plain
+  //     text, no DOM APIs needed) and merged straight into the same bookings list as
+  //     the regex/AI text pipeline.
+  if(icsFiles.length){
+    showSt1('Reading '+icsFiles.length+' calendar file'+(icsFiles.length===1?'':'s')+'…','');
+    for(var icf of icsFiles){
+      try{
+        var icsText=await readText(icf);
+        var icsResult=await invoke('/parse-ics','POST',{text:icsText});
+        if(icsResult&&icsResult.bookings&&icsResult.bookings.length){
+          parsed.bookings=parsed.bookings.concat(icsResult.bookings.map(function(b){return Object.assign({},b,{_selected:true});}));
+        }
+      }catch(_e){}
     }
   }
 
@@ -1132,9 +1261,13 @@ async function doAnalyze(){
 function renderPreview(){
   var grid=document.getElementById('sources-grid');
   grid.innerHTML='';
-  renderSourceCard(grid,'polarsteps','si-polarsteps','🧭','Polarsteps Journey',
-    parsed.polarsteps?parsed.polarsteps.name+' · '+parsed.polarsteps.stepCount+' stops':'No Polarsteps data found',
-    !!parsed.polarsteps, renderPolarstepsPreview);
+  renderSourceCard(grid,'polarsteps','si-polarsteps','🧭','Polarsteps Journey'+(parsed.polarstepsAll.length>1?'s':''),
+    parsed.polarstepsAll.length?
+      (parsed.polarstepsAll.length>1?
+        (parsed._selectedJourneyIdx||[]).length+' of '+parsed.polarstepsAll.length+' journeys selected':
+        parsed.polarsteps.name+' · '+parsed.polarsteps.stepCount+' stops'):
+      'No Polarsteps data found',
+    parsed.polarstepsAll.length>0, renderPolarstepsPreview);
   renderSourceCard(grid,'bookings','si-bookings','✈️','Booking Confirmations',
     parsed.bookings.length?parsed.bookings.length+' booking'+(parsed.bookings.length===1?' found':' found')+((parsed._pdfFiles||[]).length?' · '+parsed._pdfFiles.length+' PDF'+(parsed._pdfFiles.length===1?'':'s')+' attached':''):
       ((parsed._pdfFiles||[]).length?parsed._pdfFiles.length+' PDF'+(parsed._pdfFiles.length===1?'':'s')+' attached, no bookings recognized in the text':'No bookings found'),
@@ -1148,8 +1281,14 @@ function renderPreview(){
   renderSourceCard(grid,'timeline','si-bookings','🗺️','Google Maps Timeline',
     parsed.timelinePlaces.length?parsed.timelinePlaces.length+' location clusters found':'No timeline data found',
     parsed.timelinePlaces.length>0, renderTimelinePreview);
+  renderSourceCard(grid,'gpx','si-bookings','🥾','GPX Track',
+    parsed.gpxPlaces.length?parsed.gpxPlaces.length+' location clusters found':'No GPX file found',
+    parsed.gpxPlaces.length>0, renderGpxPreview);
+  renderSourceCard(grid,'kml','si-bookings','📌','KML/KMZ Places',
+    parsed.kmlPlaces.length?parsed.kmlPlaces.length+' location clusters found':'No KML/KMZ file found',
+    parsed.kmlPlaces.length>0, renderKmlPreview);
 
-  var hasAny=parsed.polarsteps||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length;
+  var hasAny=parsed.polarstepsAll.length||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length||parsed.gpxPlaces.length||parsed.kmlPlaces.length;
   document.getElementById('step2-next').disabled=!hasAny;
   rh();
 }
@@ -1173,20 +1312,61 @@ function toggleSource(e,id){
   body.classList.toggle('open');rh();
 }
 
+function toggleJourneySelected(idx,checked){
+  var sel=parsed._selectedJourneyIdx||[];
+  var at=sel.indexOf(idx);
+  if(checked&&at<0)sel.push(idx);
+  else if(!checked&&at>=0)sel.splice(at,1);
+  parsed._selectedJourneyIdx=sel;
+  parsed.polarsteps=parsed.polarstepsAll[sel[0]]||parsed.polarstepsAll[0]||null; // kept for any legacy single-journey reads
+  renderPreview();
+}
+
 function renderPolarstepsPreview(body){
-  var ps=parsed.polarsteps;
-  body.innerHTML='<div style="padding-top:10px;font-size:12px;color:var(--text-muted);margin-bottom:6px;">'+
-    (ps.startDate?ps.startDate+' → '+ps.endDate+' · ':'')+
-    (ps.totalKm?ps.totalKm.toLocaleString()+' km':'')+'</div>';
-  var list=document.createElement('div');list.className='preview-list';
-  (ps.steps||[]).slice(0,8).forEach(function(s){
-    var row=document.createElement('div');row.className='preview-item';
-    row.innerHTML='<span class="pi-name">'+escHtml(s.name)+'</span>'+
-      '<span class="pi-meta">'+(s.date||'')+(s.location&&s.location.lat?' 📍':'')+'</span>';
-    list.appendChild(row);
+  body.innerHTML='';
+  var selected=parsed._selectedJourneyIdx||[];
+  // A Polarsteps ZIP export can contain more than one trip (one folder+trip.json per trip) —
+  // every one found is in polarstepsAll, all pre-checked. Each CHECKED journey becomes its own
+  // trip at import time, auto-scoped to its own dates (see computeTripTargets() and CLAUDE.md) —
+  // so this list is a real multi-select, not a single "which one" picker.
+  if(parsed.polarstepsAll.length>1){
+    var list1=document.createElement('div');list1.className='preview-list';list1.style.marginBottom='8px';
+    parsed.polarstepsAll.forEach(function(p,i){
+      var row=document.createElement('label');row.className='preview-item';row.style.cursor='pointer';
+      var cb=document.createElement('input');cb.type='checkbox';cb.checked=selected.indexOf(i)>=0;
+      cb.style.flexShrink='0';
+      cb.addEventListener('change',function(){toggleJourneySelected(i,cb.checked);});
+      var nameEl=document.createElement('span');nameEl.className='pi-name';nameEl.textContent=p.name;
+      var metaEl=document.createElement('span');metaEl.className='pi-meta';
+      metaEl.textContent=(p.startDate?p.startDate+' → '+p.endDate+' · ':'')+p.stepCount+' stops';
+      row.appendChild(cb);row.appendChild(nameEl);row.appendChild(metaEl);
+      list1.appendChild(row);
+    });
+    body.appendChild(list1);
+  }
+  if(!selected.length){
+    var none=document.createElement('div');none.style.cssText='font-size:12px;color:var(--text-faint);padding:4px 0;';
+    none.textContent=parsed.polarstepsAll.length>1?'No journeys selected — none will be imported.':'';
+    if(none.textContent)body.appendChild(none);
+  }
+  // Step list: every SELECTED journey's stops, each row tagged with its journey when more
+  // than one is selected (so it's clear which trip a stop will land in).
+  var stepRows=[];
+  selected.forEach(function(i){
+    var p=parsed.polarstepsAll[i];
+    (p.steps||[]).forEach(function(s){stepRows.push({step:s,journeyName:p.name});});
   });
-  if((ps.steps||[]).length>8){var more=document.createElement('div');more.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';more.textContent='…and '+((ps.steps||[]).length-8)+' more stops';list.appendChild(more);}
-  body.appendChild(list);
+  if(stepRows.length){
+    var list=document.createElement('div');list.className='preview-list';
+    stepRows.slice(0,8).forEach(function(r){
+      var row=document.createElement('div');row.className='preview-item';
+      row.innerHTML='<span class="pi-name">'+escHtml(r.step.name)+(selected.length>1?' <span style="color:var(--text-faint);">— '+escHtml(r.journeyName)+'</span>':'')+'</span>'+
+        '<span class="pi-meta">'+(r.step.date||'')+(r.step.location&&r.step.location.lat?' 📍':'')+'</span>';
+      list.appendChild(row);
+    });
+    if(stepRows.length>8){var more=document.createElement('div');more.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';more.textContent='…and '+(stepRows.length-8)+' more stops';list.appendChild(more);}
+    body.appendChild(list);
+  }
 }
 
 function renderBookingsPreview(body){
@@ -1239,54 +1419,237 @@ function renderExpensesPreview(body){
   body.appendChild(list);
 }
 
+// ── Trip targets — date-partition everything by the selected Polarsteps journeys ─────────
+// A dropped export can genuinely contain more than one trip's worth of data (multiple
+// Polarsteps journeys, plus loose photos/bookings/expenses that may belong to any of them, or
+// to none). Dumping it all into one TREK trip regardless of dates was the reported bug — one
+// target per selected journey gets built (its OWN date range only, auto-assigned), and anything
+// that doesn't fall inside any of them is left UNASSIGNED for the user to place explicitly —
+// onto one of those same journeys, a brand-new "extra" trip they add on the fly, or several of
+// either at once (a single item can be assigned to more than one trip; assignment just means
+// "include a reference to this item when importing that target").
+//
+// State split, and why: journeyTargets/extraTargets hold the per-target EDITABLE fields
+// (title, mode, dates, existingTripId) and must survive re-renders untouched — rebuildTripTargets()
+// re-derives every target's CONTENT arrays from current data + assignments on every call (an
+// item checked/assignment-button click, or +/- extra trip) without ever recreating those target
+// objects, so an in-progress title edit or mode toggle is never silently reset mid-session.
+var journeyTargets=[], extraTargets=[], unassigned=null, extraTargetSeq=0;
+
+function buildJourneyTargets(){
+  var selectedIdx=(parsed._selectedJourneyIdx||[]).slice().sort(function(a,b){return a-b;});
+  return selectedIdx.map(function(idx){
+    var j=parsed.polarstepsAll[idx];
+    return {
+      key:'j'+idx, kind:'journey', journeyIdx:idx, label:j.name,
+      mode:'new', title:j.name, startDate:j.startDate||null, endDate:j.endDate||null,
+      existingTripId:'', polarsteps:j,
+      bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+    };
+  });
+}
+
+function addExtraTarget(){
+  extraTargetSeq++;
+  extraTargets.push({
+    key:'x'+extraTargetSeq, kind:'extra', label:'Additional trip '+extraTargetSeq,
+    mode:'new', title:'Additional trip '+extraTargetSeq, startDate:null, endDate:null,
+    existingTripId:'', polarsteps:null,
+    bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+  });
+  rebuildTripTargets();
+}
+function removeExtraTarget(key){
+  extraTargets=extraTargets.filter(function(t){return t.key!==key;});
+  // Strip any assignments pointing at the removed target so they don't silently point nowhere.
+  [parsed.bookings,parsed.expenses,parsed.gpsPlaces,parsed.timelinePlaces].concat([imgFiles]).forEach(function(arr){
+    arr.forEach(function(it){if(it._assignTo)it._assignTo=it._assignTo.filter(function(k){return k!==key;});});
+  });
+  parsed.gpxPlaces.concat(parsed.kmlPlaces).forEach(function(it){if(it._assignTo)it._assignTo=it._assignTo.filter(function(k){return k!==key;});});
+  Object.keys(parsed._stepPhotoAssign||{}).forEach(function(sid){
+    parsed._stepPhotoAssign[sid]=(parsed._stepPhotoAssign[sid]||[]).filter(function(k){return k!==key;});
+  });
+  rebuildTripTargets();
+}
+
+// Toggles whether `item` is assigned to target `key` — used by both the per-item × (remove
+// one) and the bulk "Add checked items to <target>" toolbar buttons (add-only there).
+function setItemAssigned(item,key,assigned){
+  item._assignTo=item._assignTo||[];
+  var at=item._assignTo.indexOf(key);
+  if(assigned&&at<0)item._assignTo.push(key);
+  else if(!assigned&&at>=0)item._assignTo.splice(at,1);
+}
+function setStepPhotoAssigned(stepId,key,assigned){
+  parsed._stepPhotoAssign=parsed._stepPhotoAssign||{};
+  var list=parsed._stepPhotoAssign[stepId]=parsed._stepPhotoAssign[stepId]||[];
+  var at=list.indexOf(key);
+  if(assigned&&at<0)list.push(key);
+  else if(!assigned&&at>=0)list.splice(at,1);
+}
+
+// Re-derives every target's content arrays (and the `unassigned` bucket) from the CURRENT
+// journeyTargets/extraTargets shells + each item's own date/`_assignTo`. Call after ANY change
+// that affects routing: entering step 3, adding/removing an extra trip, or (de)assigning an item.
+// Never rebuilds the target shells themselves — see the state-split note above.
+function rebuildTripTargets(){
+  var targets=journeyTargets.concat(extraTargets);
+  targets.forEach(function(t){t.bookings=[];t.expenses=[];t.gpsPlaces=[];t.timelinePlaces=[];t.imgFiles=[];t.stepPhotosByStepId={};});
+  // Solo mode: zero journeys AND zero extra trips added — there is exactly one implicit target
+  // (added below) and NOTHING is filtered or requires assignment, matching the classic
+  // single-trip wizard byte for byte. The instant a 2nd target exists (an extra trip added, or
+  // a journey selected), routing becomes real and unmatched items need an explicit decision.
+  var solo=journeyTargets.length===0&&extraTargets.length===0;
+  if(solo){
+    if(!targets.length){
+      extraTargetSeq++;
+      var soleDefault={
+        key:'x'+extraTargetSeq, kind:'extra', label:'Trip',
+        mode:'new', title:parsed.suggestedName||'Imported Trip', startDate:null, endDate:null,
+        existingTripId:'', polarsteps:null,
+        bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+      };
+      extraTargets.push(soleDefault);
+      targets.push(soleDefault);
+    }
+    var sole=targets[0];
+    parsed.bookings.filter(function(b){return b._selected;}).forEach(function(b){sole.bookings.push(b);});
+    parsed.expenses.filter(function(e){return e._selected;}).forEach(function(e){sole.expenses.push(e);});
+    parsed.gpsPlaces.forEach(function(p){sole.gpsPlaces.push(p);});
+    parsed.timelinePlaces.concat(parsed.gpxPlaces||[]).concat(parsed.kmlPlaces||[]).forEach(function(p){sole.timelinePlaces.push(p);});
+    imgFiles.forEach(function(img){sole.imgFiles.push(img);});
+    Object.keys(parsed._stepPhotosByStepId||{}).forEach(function(sid){sole.stepPhotosByStepId[sid]=parsed._stepPhotosByStepId[sid];});
+    unassigned=null;
+    tripTargets=targets;
+    return targets;
+  }
+
+  var byKey={};targets.forEach(function(t){byKey[t.key]=t;});
+  var journeysOnly=targets.filter(function(t){return t.kind==='journey';});
+  function journeyForDate(dateStr){
+    if(!dateStr)return journeysOnly.length===1?journeysOnly[0]:null;
+    for(var i=0;i<journeysOnly.length;i++){
+      var t=journeysOnly[i];
+      if(t.startDate&&t.endDate&&dateStr>=t.startDate&&dateStr<=t.endDate)return t;
+    }
+    return null;
+  }
+  var un={bookings:[],expenses:[],gpsPlaces:[],timelinePlaces:[],imgFiles:[],stepPhotosByStepId:{}};
+  function route(item,dateStr,bucket){
+    var auto=journeyForDate(dateStr);
+    if(auto){auto[bucket].push(item);return;}
+    var assigned=(item._assignTo||[]).map(function(k){return byKey[k];}).filter(Boolean);
+    if(assigned.length)assigned.forEach(function(t){t[bucket].push(item);});
+    else un[bucket].push(item);
+  }
+
+  parsed.bookings.filter(function(b){return b._selected;}).forEach(function(b){route(b,b.from_date||b.to_date,'bookings');});
+  parsed.expenses.filter(function(e){return e._selected;}).forEach(function(e){route(e,e.date,'expenses');});
+  parsed.gpsPlaces.forEach(function(p){route(p,p.date,'gpsPlaces');});
+  parsed.timelinePlaces.concat(parsed.gpxPlaces||[]).concat(parsed.kmlPlaces||[]).forEach(function(p){route(p,p.date,'timelinePlaces');});
+  // Dropped/zipped photo FILES (not just their extracted gpsPlaces cluster) — same date logic,
+  // using each photo's own resolved EXIF/Takeout date stamped onto it in doAnalyze() step 3.
+  imgFiles.forEach(function(img){route(img,img._date||null,'imgFiles');});
+  // Step photos route by which journey the step itself belongs to (never by date — a step's own
+  // photos are never ambiguous about which trip they belong to); an ORPHANED step id (shouldn't
+  // normally happen) falls through to the same manual-assignment pool as everything else.
+  Object.keys(parsed._stepPhotosByStepId||{}).forEach(function(stepId){
+    var owner=journeysOnly.find(function(t){return (t.polarsteps.steps||[]).some(function(s){return s.id===stepId;});});
+    if(owner){owner.stepPhotosByStepId[stepId]=parsed._stepPhotosByStepId[stepId];return;}
+    var assigned=((parsed._stepPhotoAssign||{})[stepId]||[]).map(function(k){return byKey[k];}).filter(Boolean);
+    if(assigned.length)assigned.forEach(function(t){t.stepPhotosByStepId[stepId]=parsed._stepPhotosByStepId[stepId];});
+    else un.stepPhotosByStepId[stepId]=parsed._stepPhotosByStepId[stepId];
+  });
+
+  unassigned=un;
+  tripTargets=targets;
+  return targets;
+}
+
+function targetHasContent(t){
+  return !!(t.polarsteps||t.bookings.length||t.expenses.length||t.gpsPlaces.length||t.timelinePlaces.length||t.imgFiles.length||Object.keys(t.stepPhotosByStepId).length);
+}
+function unassignedHasContent(){
+  return !!(unassigned&&(unassigned.bookings.length||unassigned.expenses.length||unassigned.gpsPlaces.length||unassigned.timelinePlaces.length||unassigned.imgFiles.length||Object.keys(unassigned.stepPhotosByStepId).length));
+}
+
 // ── Configure ──────────────────────────────────────────────────────────────
 async function prepareStep3(){
-  // Pre-fill trip name from sources
-  var suggested=(parsed.polarsteps?.name||parsed.suggestedName||'');
-  if(suggested&&!document.getElementById('trip-title').value)document.getElementById('trip-title').value=suggested;
-  if(parsed.polarsteps?.startDate)document.getElementById('trip-start').value=parsed.polarsteps.startDate;
-  if(parsed.polarsteps?.endDate)document.getElementById('trip-end').value=parsed.polarsteps.endDate;
+  journeyTargets=buildJourneyTargets();
+  extraTargets=[];
+  rebuildTripTargets();
 
-  // No Polarsteps trip.json means no authoritative start/end date, and a brand-new trip
-  // would otherwise get created with null dates (see server/index.js's own /import fallback,
-  // which does the same min/max-across-sources trick but only to size day-row creation, not
-  // to fill in the trip's own start_date/end_date). Fall back to the earliest/latest date
-  // found across every other imported source so the fields aren't left blank.
-  var startEl=document.getElementById('trip-start'),endEl=document.getElementById('trip-end');
-  var dateHint=document.getElementById('date-detect-hint');
-  if(!parsed.polarsteps?.startDate&&!startEl.value&&!endEl.value){
-    // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a stray malformed
-    // date (e.g. a source that isn't fully ISO-normalized) sorts unpredictably against real
-    // ISO dates and can silently pick a garbage min/max, which <input type="date"> then
-    // rejects on assignment, leaving the field blank (the bug where adding more sources on
-    // top of a working booking-only import broke date detection instead of improving it).
-    var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
-    var allDates=[];
-    parsed.bookings.forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
-    parsed.gpsPlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
-    parsed.timelinePlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
-    parsed.expenses.forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
-    allDates.sort();
-    if(allDates.length){
-      startEl.value=allDates[0];endEl.value=allDates[allDates.length-1];
-      if(dateHint){
-        dateHint.textContent='📅 No Polarsteps trip found — dates auto-detected from '+allDates.length+' date'+(allDates.length===1?'':'s')+' across your bookings/photos/expenses. Double-check before importing.';
-        dateHint.style.display='';
+  // Shared by the classic single #trip-select AND every per-target "existing trip" select
+  // in the multi-trip case — load once.
+  var existingTrips=[];
+  try{ var data=await invoke('/trips','GET'); existingTrips=data.trips||[]; }catch(_e){}
+  window._existingTripsCache=existingTrips;
+
+  // The classic single-trip UI only applies when there's exactly one target AND nothing needs
+  // a manual decision — the instant there's a 2nd target or any unassigned data, the multi UI
+  // takes over so the unassigned panel has somewhere to render.
+  var showClassic=tripTargets.length<=1&&!unassignedHasContent();
+  if(showClassic){
+    document.getElementById('single-trip-config').style.display='';
+    document.getElementById('multi-trip-config').style.display='none';
+    var target=tripTargets[0]||null;
+
+    var suggested=(target&&target.title)||parsed.suggestedName||'';
+    if(suggested&&!document.getElementById('trip-title').value)document.getElementById('trip-title').value=suggested;
+    if(target&&target.startDate)document.getElementById('trip-start').value=target.startDate;
+    if(target&&target.endDate)document.getElementById('trip-end').value=target.endDate;
+
+    // No Polarsteps trip.json means no authoritative start/end date, and a brand-new trip
+    // would otherwise get created with null dates. Fall back to the earliest/latest date found
+    // across this target's own sources so the fields aren't left blank.
+    var startEl=document.getElementById('trip-start'),endEl=document.getElementById('trip-end');
+    var dateHint=document.getElementById('date-detect-hint');
+    if(!(target&&target.startDate)&&!startEl.value&&!endEl.value){
+      // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a stray malformed
+      // date sorts unpredictably against real ISO dates and can silently pick a garbage
+      // min/max, which <input type="date"> then rejects on assignment, leaving the field blank.
+      var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
+      var allDates=[];
+      var src=target||{bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[]};
+      src.bookings.forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
+      src.gpsPlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+      src.timelinePlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+      src.expenses.forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+      allDates.sort();
+      if(allDates.length){
+        startEl.value=allDates[0];endEl.value=allDates[allDates.length-1];
+        if(dateHint){
+          dateHint.textContent='📅 No Polarsteps trip found — dates auto-detected from '+allDates.length+' date'+(allDates.length===1?'':'s')+' across your bookings/photos/expenses. Double-check before importing.';
+          dateHint.style.display='';
+        }
       }
-    }
-  }else if(dateHint){dateHint.style.display='none';}
+    }else if(dateHint){dateHint.style.display='none';}
 
-  // Dim options that have no data
-  setOptAvail('opt-journal-wrap',!!parsed.polarsteps);
-  setOptAvail('opt-places-wrap',!!(parsed.polarsteps||parsed.gpsPlaces.length||parsed.timelinePlaces.length));
-  setOptAvail('opt-bookings-wrap',parsed.bookings.length>0);
-  setOptAvail('opt-costs-wrap',parsed.expenses.length>0);
-  setOptAvail('opt-daynotes-wrap',!!parsed.polarsteps);
+    var sel=document.getElementById('trip-select');
+    sel.innerHTML='<option value="">— select —</option>';
+    existingTrips.forEach(function(t){
+      var o=document.createElement('option');o.value=t.id;o.textContent=t.title+(t.startDate?' ('+t.startDate+')':'');sel.appendChild(o);
+    });
+  }else{
+    document.getElementById('single-trip-config').style.display='none';
+    document.getElementById('multi-trip-config').style.display='';
+    renderTripTargets();
+  }
+
+  // "What to import" toggles and the currency picker are shared across every target in the
+  // batch — dim/show based on whether ANY target OR the unassigned pool has that kind of data
+  // (unassigned data still needs these toggles available so it can actually be imported once assigned).
+  var un=unassigned||{bookings:[],expenses:[],gpsPlaces:[],timelinePlaces:[]};
+  var anyJourney=tripTargets.some(function(t){return !!t.polarsteps;});
+  setOptAvail('opt-journal-wrap',anyJourney);
+  setOptAvail('opt-places-wrap',tripTargets.some(function(t){return !!t.polarsteps||t.gpsPlaces.length||t.timelinePlaces.length;})||un.gpsPlaces.length>0||un.timelinePlaces.length>0);
+  setOptAvail('opt-bookings-wrap',tripTargets.some(function(t){return t.bookings.length>0;})||un.bookings.length>0);
+  setOptAvail('opt-costs-wrap',tripTargets.some(function(t){return t.expenses.length>0;})||un.expenses.length>0);
+  setOptAvail('opt-daynotes-wrap',anyJourney);
   setOptAvail('opt-photos-wrap',imgFiles.length>0);
 
-  // Show the default-currency picker whenever there's a cost or booking price that
-  // might need it, and pre-select the most common currency actually detected in the
-  // source data (falls back to the dropdown's own default, EUR, if none was found).
+  // Pre-select the most common currency actually detected in the source data (falls back to
+  // the dropdown's own default, EUR, if none was found).
   var hasCostsOrPrices=parsed.expenses.length>0||parsed.bookings.some(function(b){return b.price!=null;});
   document.getElementById('currency-wrap').style.display=hasCostsOrPrices?'':'none';
   if(hasCostsOrPrices){
@@ -1299,17 +1662,246 @@ async function prepareStep3(){
       if(Array.prototype.some.call(currSel.options,function(o){return o.value===best;}))currSel.value=best;
     }
   }
-
-  // Load existing trips
-  try{
-    var data=await invoke('/trips','GET');
-    var sel=document.getElementById('trip-select');
-    sel.innerHTML='<option value="">— select —</option>';
-    (data.trips||[]).forEach(function(t){
-      var o=document.createElement('option');o.value=t.id;o.textContent=t.title+(t.startDate?' ('+t.startDate+')':'');sel.appendChild(o);
-    });
-  }catch(_e){}
   rh();
+}
+
+// Renders one config card per trip target (2+ targets, or any unassigned data — see
+// prepareStep3()), an "+ Add another trip" button, and the unassigned-items panel below it.
+// Each card's inputs mutate the target object directly (closures over `t`); only mode toggles
+// and add/remove-trip (which change the set of cards or a card's own layout) re-render.
+function renderTripTargets(){
+  var container=document.getElementById('trip-targets-list');
+  container.innerHTML='';
+  var existingTrips=window._existingTripsCache||[];
+  tripTargets.forEach(function(t){
+    var card=document.createElement('div');card.className='target-card';
+    card.style.cssText='border:1px solid var(--border-primary);border-radius:10px;padding:12px;margin-bottom:10px;';
+
+    var counts=[];
+    if(t.polarsteps)counts.push(t.polarsteps.stepCount+' stops');
+    if(t.bookings.length)counts.push(t.bookings.length+' booking'+(t.bookings.length===1?'':'s'));
+    var locCount=t.gpsPlaces.length+t.timelinePlaces.length;
+    if(locCount)counts.push(locCount+' location'+(locCount===1?'':'s'));
+    if(t.imgFiles.length)counts.push(t.imgFiles.length+' photo'+(t.imgFiles.length===1?'':'s'));
+    if(t.expenses.length)counts.push(t.expenses.length+' expense'+(t.expenses.length===1?'':'s'));
+    var stepPhotoCount=Object.keys(t.stepPhotosByStepId).reduce(function(n,k){return n+t.stepPhotosByStepId[k].length;},0);
+    if(stepPhotoCount)counts.push(stepPhotoCount+' Polarsteps photo'+(stepPhotoCount===1?'':'s'));
+
+    var head=document.createElement('div');head.style.cssText='display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
+    var headText=document.createElement('div');
+    headText.innerHTML='<div style="font-size:13px;font-weight:600;color:var(--text-primary);">'+escHtml(t.label)+'</div>'+
+      '<div style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">'+
+      (t.kind==='journey'&&t.startDate?t.startDate+' → '+t.endDate+' · ':'')+
+      (counts.length?escHtml(counts.join(' · ')):'No data assigned yet')+'</div>';
+    head.appendChild(headText);
+    if(t.kind==='extra'&&extraTargets.length>1){
+      var rmBtn=document.createElement('button');rmBtn.type='button';rmBtn.title='Remove this trip';
+      rmBtn.style.cssText='border:none;background:none;color:var(--text-faint);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;';
+      rmBtn.textContent='×';
+      rmBtn.addEventListener('click',function(){removeExtraTarget(t.key);renderTripTargets();});
+      head.appendChild(rmBtn);
+    }
+    card.appendChild(head);
+
+    var modeRow=document.createElement('div');modeRow.className='trip-mode-row';modeRow.style.marginBottom='8px';
+    var btnNew=document.createElement('button');btnNew.type='button';btnNew.className='tmode-btn'+(t.mode==='new'?' active':'');btnNew.textContent='New trip';
+    var btnExisting=document.createElement('button');btnExisting.type='button';btnExisting.className='tmode-btn'+(t.mode==='existing'?' active':'');btnExisting.textContent='Existing trip';
+    btnNew.addEventListener('click',function(){t.mode='new';renderTripTargets();});
+    btnExisting.addEventListener('click',function(){t.mode='existing';renderTripTargets();});
+    modeRow.appendChild(btnNew);modeRow.appendChild(btnExisting);
+    card.appendChild(modeRow);
+
+    if(t.mode==='new'){
+      var titleWrap=document.createElement('div');titleWrap.className='field-wrap';
+      var titleLabel=document.createElement('label');titleLabel.textContent='Trip name';
+      var titleInput=document.createElement('input');titleInput.className='field-input';titleInput.value=t.title||'';
+      titleInput.addEventListener('input',function(){t.title=titleInput.value;});
+      titleWrap.appendChild(titleLabel);titleWrap.appendChild(titleInput);
+      card.appendChild(titleWrap);
+      if(t.kind==='extra'){
+        var dateRow=document.createElement('div');dateRow.className='date-row';
+        var startWrap=document.createElement('div');startWrap.className='field-wrap';
+        var startLabel=document.createElement('label');startLabel.textContent='Start date';
+        var startInput=document.createElement('input');startInput.type='date';startInput.className='field-input';startInput.value=t.startDate||'';
+        startInput.addEventListener('input',function(){t.startDate=startInput.value||null;});
+        startWrap.appendChild(startLabel);startWrap.appendChild(startInput);
+        var endWrap=document.createElement('div');endWrap.className='field-wrap';
+        var endLabel=document.createElement('label');endLabel.textContent='End date';
+        var endInput=document.createElement('input');endInput.type='date';endInput.className='field-input';endInput.value=t.endDate||'';
+        endInput.addEventListener('input',function(){t.endDate=endInput.value||null;});
+        endWrap.appendChild(endLabel);endWrap.appendChild(endInput);
+        dateRow.appendChild(startWrap);dateRow.appendChild(endWrap);
+        card.appendChild(dateRow);
+      }
+    }else if(t.mode==='existing'){
+      var existWrap=document.createElement('div');existWrap.className='field-wrap';
+      var existLabel=document.createElement('label');existLabel.textContent='Select trip';
+      var existSel=document.createElement('select');existSel.className='field-input';existSel.setAttribute('data-trek-native','');
+      var optNone=document.createElement('option');optNone.value='';optNone.textContent='— select —';existSel.appendChild(optNone);
+      existingTrips.forEach(function(et){
+        var o=document.createElement('option');o.value=et.id;o.textContent=et.title+(et.startDate?' ('+et.startDate+')':'');
+        if(String(t.existingTripId)===String(et.id))o.selected=true;
+        existSel.appendChild(o);
+      });
+      existSel.addEventListener('change',function(){t.existingTripId=existSel.value;});
+      existWrap.appendChild(existLabel);existWrap.appendChild(existSel);
+      card.appendChild(existWrap);
+    }
+
+    container.appendChild(card);
+  });
+
+  var addBtn=document.createElement('button');addBtn.type='button';addBtn.className='btn-s';addBtn.style.marginBottom='14px';
+  addBtn.textContent='+ Add another trip';
+  addBtn.addEventListener('click',function(){addExtraTarget();renderTripTargets();});
+  container.appendChild(addBtn);
+
+  renderUnassignedPanel(container);
+  rh();
+}
+
+// The "needs a decision" panel: every item that fell outside every selected journey's dates,
+// grouped by kind, each with a bulk "add checked items to <trip>" toolbar (works for 1 item or
+// many) and a per-item × on its already-assigned chips (an item can carry more than one chip —
+// assigning it to 2 trips just means it gets imported into both).
+function renderUnassignedPanel(container){
+  if(!unassignedHasContent())return;
+  var panel=document.createElement('div');panel.style.cssText='border:1px solid var(--warning);border-radius:10px;padding:12px;margin-bottom:10px;';
+  var warn=document.createElement('div');
+  warn.style.cssText='font-size:12px;color:var(--warning);margin-bottom:10px;';
+  warn.textContent='⚠️ The items below don\'t fall inside any selected journey\'s dates. Assign each to one or more trips (check items, then click a trip below them), or leave unchecked/unassigned to skip them.';
+  panel.appendChild(warn);
+
+  renderUnassignedItemGroup(panel,unassigned.bookings,{
+    title:'booking',bucket:'bookings',
+    getLabel:function(b){return b.title;},
+    getMeta:function(b){return b.from_date||b.to_date||'';},
+  });
+  renderUnassignedItemGroup(panel,unassigned.expenses,{
+    title:'expense',bucket:'expenses',
+    getLabel:function(e){return e.name;},
+    getMeta:function(e){return e.date||(e.amount?(e.currency||'')+' '+e.amount:'');},
+  });
+  var locations=unassigned.gpsPlaces.concat(unassigned.timelinePlaces);
+  renderUnassignedItemGroup(panel,locations,{
+    title:'location',bucket:'locations',
+    getLabel:function(p){return p.name||'Location';},
+    getMeta:function(p){return (p.date||'')+' · '+p.lat.toFixed(2)+', '+p.lng.toFixed(2);},
+  });
+  renderUnassignedItemGroup(panel,unassigned.imgFiles,{
+    title:'photo',bucket:'imgFiles',
+    getLabel:function(img){return img.name;},
+    getMeta:function(img){return img._date||'no date';},
+  });
+  renderUnassignedStepPhotoGroup(panel,unassigned.stepPhotosByStepId);
+
+  container.appendChild(panel);
+}
+
+function renderUnassignedItemGroup(container,items,opts){
+  if(!items.length)return;
+  var wrap=document.createElement('div');wrap.style.marginBottom='12px';
+  var allChecked=items.every(function(it){return it._uiChecked!==false;});
+  var head=document.createElement('label');head.style.cssText='display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:4px;';
+  var headCb=document.createElement('input');headCb.type='checkbox';headCb.checked=allChecked;
+  headCb.addEventListener('change',function(){items.forEach(function(it){it._uiChecked=headCb.checked;});renderTripTargets();});
+  head.appendChild(headCb);
+  var headText=document.createElement('span');headText.textContent=items.length+' '+opts.title+(items.length===1?'':'s')+' need a trip';
+  head.appendChild(headText);
+  wrap.appendChild(head);
+
+  var list=document.createElement('div');list.className='preview-list';
+  items.forEach(function(item){
+    var row=document.createElement('div');row.className='preview-item';
+    var cb=document.createElement('input');cb.type='checkbox';cb.checked=item._uiChecked!==false;cb.style.flexShrink='0';
+    cb.addEventListener('change',function(){item._uiChecked=cb.checked;});
+    var nameEl=document.createElement('span');nameEl.className='pi-name';nameEl.textContent=opts.getLabel(item);
+    var metaWrap=document.createElement('span');metaWrap.className='pi-meta';metaWrap.style.cssText='display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;align-items:center;';
+    var metaText=document.createElement('span');metaText.textContent=opts.getMeta(item);
+    metaWrap.appendChild(metaText);
+    (item._assignTo||[]).forEach(function(key){
+      var t=tripTargets.find(function(x){return x.key===key;});
+      if(!t)return;
+      var chip=document.createElement('span');
+      chip.style.cssText='display:inline-flex;align-items:center;gap:3px;background:var(--bg-hover);border-radius:20px;padding:1px 4px 1px 8px;font-size:10px;color:var(--text-secondary);';
+      chip.textContent=t.label;
+      var x=document.createElement('button');x.type='button';x.textContent='×';
+      x.style.cssText='border:none;background:none;color:var(--text-faint);cursor:pointer;font-size:12px;line-height:1;padding:0 3px;';
+      x.addEventListener('click',function(){setItemAssigned(item,key,false);rebuildTripTargets();renderTripTargets();});
+      chip.appendChild(x);
+      metaWrap.appendChild(chip);
+    });
+    row.appendChild(cb);row.appendChild(nameEl);row.appendChild(metaWrap);
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+
+  var toolbar=document.createElement('div');toolbar.style.cssText='display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-top:6px;';
+  var toolbarLabel=document.createElement('span');toolbarLabel.style.cssText='font-size:11px;color:var(--text-faint);';toolbarLabel.textContent='Add checked to:';
+  toolbar.appendChild(toolbarLabel);
+  tripTargets.forEach(function(t){
+    var btn=document.createElement('button');btn.type='button';btn.className='btn-s';btn.style.cssText='font-size:11px;padding:4px 10px;';
+    btn.textContent=t.label;
+    btn.addEventListener('click',function(){
+      items.forEach(function(it){if(it._uiChecked!==false)setItemAssigned(it,t.key,true);});
+      rebuildTripTargets();renderTripTargets();
+    });
+    toolbar.appendChild(btn);
+  });
+  wrap.appendChild(toolbar);
+  container.appendChild(wrap);
+}
+
+// Same idea as renderUnassignedItemGroup but keyed by Polarsteps step id (parsed._stepPhotoAssign)
+// instead of a per-item `_assignTo` array — orphaned step photos are rare (see computeTripTargets
+// notes), so this groups by step rather than listing every individual photo.
+function renderUnassignedStepPhotoGroup(container,stepPhotosByStepId){
+  var stepIds=Object.keys(stepPhotosByStepId||{});
+  if(!stepIds.length)return;
+  var wrap=document.createElement('div');wrap.style.marginBottom='12px';
+  var head=document.createElement('div');head.style.cssText='font-size:12px;font-weight:600;color:var(--text-primary);margin-bottom:4px;';
+  var totalPhotos=stepIds.reduce(function(n,id){return n+stepPhotosByStepId[id].length;},0);
+  head.textContent=totalPhotos+' Polarsteps photo'+(totalPhotos===1?'':'s')+' (orphaned step) need a trip';
+  wrap.appendChild(head);
+
+  var list=document.createElement('div');list.className='preview-list';
+  stepIds.forEach(function(stepId){
+    var row=document.createElement('div');row.className='preview-item';
+    var nameEl=document.createElement('span');nameEl.className='pi-name';nameEl.textContent='Step '+stepId;
+    var metaWrap=document.createElement('span');metaWrap.className='pi-meta';metaWrap.style.cssText='display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;align-items:center;';
+    var metaText=document.createElement('span');metaText.textContent=stepPhotosByStepId[stepId].length+' photo'+(stepPhotosByStepId[stepId].length===1?'':'s');
+    metaWrap.appendChild(metaText);
+    ((parsed._stepPhotoAssign||{})[stepId]||[]).forEach(function(key){
+      var t=tripTargets.find(function(x){return x.key===key;});
+      if(!t)return;
+      var chip=document.createElement('span');
+      chip.style.cssText='display:inline-flex;align-items:center;gap:3px;background:var(--bg-hover);border-radius:20px;padding:1px 4px 1px 8px;font-size:10px;color:var(--text-secondary);';
+      chip.textContent=t.label;
+      var x=document.createElement('button');x.type='button';x.textContent='×';
+      x.style.cssText='border:none;background:none;color:var(--text-faint);cursor:pointer;font-size:12px;line-height:1;padding:0 3px;';
+      x.addEventListener('click',function(){setStepPhotoAssigned(stepId,key,false);rebuildTripTargets();renderTripTargets();});
+      chip.appendChild(x);
+      metaWrap.appendChild(chip);
+    });
+    row.appendChild(nameEl);row.appendChild(metaWrap);
+    list.appendChild(row);
+  });
+  wrap.appendChild(list);
+
+  var toolbar=document.createElement('div');toolbar.style.cssText='display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding-top:6px;';
+  var toolbarLabel=document.createElement('span');toolbarLabel.style.cssText='font-size:11px;color:var(--text-faint);';toolbarLabel.textContent='Add all to:';
+  toolbar.appendChild(toolbarLabel);
+  tripTargets.forEach(function(t){
+    var btn=document.createElement('button');btn.type='button';btn.className='btn-s';btn.style.cssText='font-size:11px;padding:4px 10px;';
+    btn.textContent=t.label;
+    btn.addEventListener('click',function(){
+      stepIds.forEach(function(stepId){setStepPhotoAssigned(stepId,t.key,true);});
+      rebuildTripTargets();renderTripTargets();
+    });
+    toolbar.appendChild(btn);
+  });
+  wrap.appendChild(toolbar);
+  container.appendChild(wrap);
 }
 
 function setOptAvail(id,avail){
@@ -1330,14 +1922,41 @@ function setTripMode(mode){
 
 // ── Import ─────────────────────────────────────────────────────────────────
 async function doImport(){
-  var tripConfig={mode:tripMode};
-  if(tripMode==='new'){
-    tripConfig.title=document.getElementById('trip-title').value||'Imported Trip';
-    tripConfig.startDate=document.getElementById('trip-start').value||null;
-    tripConfig.endDate=document.getElementById('trip-end').value||null;
-  } else {
-    tripConfig.tripId=document.getElementById('trip-select').value;
-    if(!tripConfig.tripId){alert('Please select a trip.');return;}
+  // The classic single-trip case (exactly one target AND nothing unassigned — see prepareStep3())
+  // is configured through the classic step-3 fields (#trip-title/#trip-start/#trip-end/
+  // #trip-select, tripMode) rather than a rendered target card — those fields are never wired
+  // back into tripTargets itself (that's renderTripTargets()'s job, for the multi-trip UI only),
+  // so sync them here before deciding what's active.
+  var showClassic=tripTargets.length<=1&&!unassignedHasContent();
+  if(showClassic&&tripTargets[0]){
+    var soleTarget=tripTargets[0];
+    soleTarget.mode=tripMode;
+    if(tripMode==='new'){
+      soleTarget.title=document.getElementById('trip-title').value||'Imported Trip';
+      soleTarget.startDate=document.getElementById('trip-start').value||null;
+      soleTarget.endDate=document.getElementById('trip-end').value||null;
+    }else{
+      soleTarget.existingTripId=document.getElementById('trip-select').value;
+    }
+  }
+
+  // Every journey target always runs (the user explicitly checked it in step 2, even if it
+  // turns out to have zero stops). An extra/ad-hoc trip only runs if something was actually
+  // assigned to it — an unused "+ Add another trip" card is silently skipped, not imported empty.
+  var activeTargets=tripTargets.filter(function(t){return t.kind==='journey'||targetHasContent(t);});
+  if(!activeTargets.length){alert('Nothing to import — no trip has any data assigned.');return;}
+  for(var chk of activeTargets){
+    if(chk.mode==='existing'&&!chk.existingTripId){alert('Please select a trip for "'+chk.label+'".');return;}
+  }
+
+  if(unassignedHasContent()){
+    var unCount=unassigned.bookings.length+unassigned.expenses.length+unassigned.gpsPlaces.length+
+      unassigned.timelinePlaces.length+unassigned.imgFiles.length+Object.keys(unassigned.stepPhotosByStepId).length;
+    var proceed=await trekConfirm(
+      unCount+' item'+(unCount===1?'':'s')+' '+(unCount===1?"isn't":"aren't")+' assigned to any trip and will be skipped. Continue with the import?',
+      {title:'Unassigned items',confirmLabel:'Continue',cancelLabel:'Go back',danger:false}
+    );
+    if(!proceed)return;
   }
 
   var options={
@@ -1354,18 +1973,80 @@ async function doImport(){
   var prog=document.getElementById('prog-content');
   prog.innerHTML='';
 
+  // A dropped PDF's text is concatenated with every other text source before booking
+  // extraction (see doAnalyze() step 4), so there's no per-file → per-booking → per-target
+  // link to attach it precisely. Attach every PDF to whichever target is most likely to be
+  // "the" trip for unscoped documents: an ad-hoc "+ Add another trip" target if one is active
+  // (that's exactly the kind of bucket a user creates for stuff that doesn't fit a journey),
+  // else the target with the most bookings, else the last one.
+  var pdfTarget=activeTargets.find(function(t){return t.kind==='extra';})||
+    activeTargets.slice().sort(function(a,b){return b.bookings.length-a.bookings.length;})[0];
+
+  var multi=activeTargets.length>1;
+  var batches=[]; // {tripId, refs} per target — feeds a batch-aware Undo
+
+  for(var ti=0;ti<activeTargets.length;ti++){
+    var target=activeTargets[ti];
+    var section=document.createElement('div');section.style.marginBottom='20px';
+    if(multi){
+      var sectionHead=document.createElement('div');
+      sectionHead.style.cssText='font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;';
+      sectionHead.textContent=(ti+1)+'/'+activeTargets.length+' · '+target.label;
+      section.appendChild(sectionHead);
+    }
+    var progList=document.createElement('div');progList.className='prog-list';section.appendChild(progList);
+    prog.appendChild(section);
+    rh();
+
+    try{
+      var res=await importOneTarget(target,options,progList,target===pdfTarget);
+      batches.push({tripId:res.tripId,refs:res.refs});
+      var banner=document.createElement('div');banner.className='result-banner';banner.style.marginTop='10px';
+      var logHtml=(res.log||[]).map(function(l){
+        var icons={trip:'🗺️',days:'📅',journal:'📔',places:'📍',bookings:'✈️',costs:'💸',pdfbooks:'📄',photos:'🖼️',steppics:'🧭'};
+        return '<div class="result-item">'+(icons[l.type]||'✓')+' '+escHtml(l.message)+'</div>';
+      }).join('');
+      banner.innerHTML='<div class="result-title"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg> Imported</div>'+
+        '<div class="result-items">'+logHtml+'</div>'+
+        ((res.errors||[]).length?'<div style="margin-top:8px;font-size:12px;color:var(--warning);">'+res.errors.length+' warning'+(res.errors.length===1?'':'s')+': '+res.errors.slice(0,2).map(function(e){return escHtml(e);}).join('; ')+'</div>':'');
+      section.appendChild(banner);
+    }catch(e){
+      var errDiv=document.createElement('div');errDiv.className='et';errDiv.textContent='Import failed for "'+target.label+'": '+e.message;
+      section.appendChild(errDiv);
+    }
+    rh();
+  }
+
+  window._lastImportBatches=batches;
+  document.getElementById('done-row').style.display='flex';
+  var undoBtn=document.getElementById('undo-import-btn');
+  var totalRefs=batches.reduce(function(n,b){return n+(b.refs?b.refs.length:0);},0);
+  if(undoBtn){undoBtn.style.display=totalRefs?'':'none';undoBtn.disabled=false;undoBtn.textContent='Undo this import';}
+  rh();
+}
+
+// Runs the full resumable /import loop plus the PDF-attach/photo-upload phases for ONE trip
+// target, writing progress into its own `progList` container with ids prefixed by
+// `target.key` (so multiple targets' progress items — same underlying log `type`s from the
+// server — never collide in the one shared document). Extracted from what used to be the
+// entire body of doImport() so doImport() can call this once per active target.
+async function importOneTarget(target,options,progList,isPdfTarget){
+  var kp=target.key+'-';
+  var tripConfig=target.mode==='existing'?
+    {mode:'existing',tripId:target.existingTripId}:
+    {mode:'new',title:target.title||'Imported Trip',startDate:target.startDate||null,endDate:target.endDate||null};
+  var pdfFiles=isPdfTarget?(parsed._pdfFiles||[]):[];
+
   var steps=[
-    {id:'trip',label:tripMode==='new'?'Creating trip':'Linking to trip',icon:'🗺️'},
-    (options.importJournal||options.importPlaces||options.importBookings)?{id:'days',label:'Preparing trip calendar days',icon:'📅'}:null,
-    options.importJournal&&parsed.polarsteps?{id:'journal',label:'Creating journal entries ('+parsed.polarsteps.stepCount+' stops)',icon:'📔'}:null,
-    options.importPlaces&&(parsed.polarsteps||parsed.gpsPlaces.length)?{id:'places',label:'Adding places & GPS locations',icon:'📍'}:null,
-    options.importBookings&&parsed.bookings.filter(function(b){return b._selected;}).length?{id:'bookings',label:'Importing '+parsed.bookings.filter(function(b){return b._selected;}).length+' bookings',icon:'✈️'}:null,
-    options.importBookings&&(parsed._pdfFiles||[]).length?{id:'pdfbooks',label:'Attaching '+parsed._pdfFiles.length+' original PDF'+(parsed._pdfFiles.length===1?'':'s')+' to the trip',icon:'📄'}:null,
-    options.importCosts&&parsed.expenses.length?{id:'costs',label:'Adding '+parsed.expenses.filter(function(e){return e._selected;}).length+' expenses',icon:'💸'}:null,
+    {id:kp+'trip',label:target.mode==='new'?'Creating trip':'Linking to trip',icon:'🗺️'},
+    (options.importJournal||options.importPlaces||options.importBookings)?{id:kp+'days',label:'Preparing trip calendar days',icon:'📅'}:null,
+    options.importJournal&&target.polarsteps?{id:kp+'journal',label:'Creating journal entries ('+target.polarsteps.stepCount+' stops)',icon:'📔'}:null,
+    options.importPlaces&&(target.polarsteps||target.gpsPlaces.length||target.timelinePlaces.length)?{id:kp+'places',label:'Adding places & GPS locations',icon:'📍'}:null,
+    options.importBookings&&target.bookings.length?{id:kp+'bookings',label:'Importing '+target.bookings.length+' bookings',icon:'✈️'}:null,
+    options.importBookings&&pdfFiles.length?{id:kp+'pdfbooks',label:'Attaching '+pdfFiles.length+' original PDF'+(pdfFiles.length===1?'':'s')+' to the trip',icon:'📄'}:null,
+    options.importCosts&&target.expenses.length?{id:kp+'costs',label:'Adding '+target.expenses.length+' expenses',icon:'💸'}:null,
   ].filter(Boolean);
 
-  // Render progress items
-  var progList=document.createElement('div');progList.className='prog-list';prog.appendChild(progList);
   steps.forEach(function(s){
     var item=document.createElement('div');item.className='prog-item';item.id='pi-'+s.id;
     item.innerHTML='<div class="prog-icon" id="ic-'+s.id+'">'+s.icon+'</div>'+
@@ -1373,126 +2054,185 @@ async function doImport(){
     progList.appendChild(item);
   });
   rh();
+  setProgRunning(kp+'trip');
 
-  // Mark trip step as running
-  setProgRunning('trip');
-
-  try{
-    // /import is index-resumable: the real per-call budget is much tighter than the platform's
-    // documented 30s (TREK's own trek:invoke bridge enforces ~8s round-trip) — a single call rarely
-    // finishes everything for a non-trivial trip. Loop, feeding each response's `progress` back in
-    // as the next call's input and switching to {mode:'existing', tripId} after the first call,
-    // until the server reports every section done. This replaces manual "click Import again."
-    var importBody={
-      polarsteps:parsed.polarsteps,
-      bookings:parsed.bookings.filter(function(b){return b._selected;}),
-      gpsPlaces:parsed.gpsPlaces,
-      timelinePlaces:parsed.timelinePlaces,
-      expenses:parsed.expenses.filter(function(e){return e._selected;}),
-      options,
-    };
-    var progress=undefined,result=null,round=0,allErrors=[];
-    do{
-      round++;
-      result=await invoke('/import','POST',Object.assign({tripConfig:tripConfig,progress:progress},importBody));
-      tripConfig={mode:'existing',tripId:result.tripId};
-      progress=result.progress||{done:true};
-      // result.log messages are cumulative totals (server-side), safe to just redisplay each round.
-      // result.errors are per-round (only errors from items processed THIS round), so accumulate them.
-      if(result.errors&&result.errors.length)allErrors=allErrors.concat(result.errors);
-      (result.log||[]).forEach(function(l){
-        if(l.type==='trip'||progress.done)setProgDone(l.type,l.message);
-        else setProgUpdate(l.type,l.message);
-      });
-      if(!progress.done)setProgUpdate('trip','Resuming — round '+(round+1)+'…');
-      rh();
-    }while(!progress.done&&round<200);
-    if(round>=200)allErrors.push('Import stopped after 200 rounds — please report this');
-    result.errors=allErrors;
-
-    // Mark any remaining as done or error
-    steps.forEach(function(s){
-      var ic=document.getElementById('ic-'+s.id);
-      if(ic&&!ic.classList.contains('done')&&!ic.classList.contains('error')){
-        setProgDone(s.id,'Done');
-      }
+  // /import is index-resumable: the real per-call budget is much tighter than the platform's
+  // documented 30s (TREK's own trek:invoke bridge enforces ~8s round-trip) — a single call
+  // rarely finishes everything for a non-trivial trip. Loop, feeding each response's `progress`
+  // back in as the next call's input and switching to {mode:'existing', tripId} after the
+  // first call, until the server reports every section done.
+  var importBody={
+    polarsteps:target.polarsteps,
+    bookings:target.bookings,
+    gpsPlaces:target.gpsPlaces,
+    timelinePlaces:target.timelinePlaces,
+    expenses:target.expenses,
+    options,
+  };
+  var progress=undefined,result=null,round=0,allErrors=[];
+  do{
+    round++;
+    result=await invoke('/import','POST',Object.assign({tripConfig:tripConfig,progress:progress},importBody));
+    tripConfig={mode:'existing',tripId:result.tripId};
+    progress=result.progress||{done:true};
+    // result.log messages are cumulative totals (server-side), safe to just redisplay each round.
+    // result.errors are per-round (only errors from items processed THIS round), so accumulate them.
+    if(result.errors&&result.errors.length)allErrors=allErrors.concat(result.errors);
+    (result.log||[]).forEach(function(l){
+      if(l.type==='trip'||progress.done)setProgDone(kp+l.type,l.message);
+      else setProgUpdate(kp+l.type,l.message);
     });
+    if(!progress.done)setProgUpdate(kp+'trip','Resuming — round '+(round+1)+'…');
+    rh();
+  }while(!progress.done&&round<200);
+  if(round>=200)allErrors.push('Import stopped after 200 rounds — please report this');
 
-    // Attach original PDFs to the trip as files (backup for reference — the
-    // booking data itself was already extracted from their text and imported above).
-    // The plugin-route proxy 413s on large request bodies (same limit the photo
-    // upload path already works around — see PDF_ATTACH_MAX_BASE64 below), and a
-    // multi-page ticket/QR-code PDF routinely exceeds it, so oversized PDFs are
-    // skipped here rather than sent and rejected — the booking itself already
-    // made it in via the text pipeline either way.
-    if(options.importBookings&&result.tripId&&(parsed._pdfFiles||[]).length){
-      setProgRunning('pdfbooks');
-      var PDF_ATTACH_MAX_BASE64=900*1024;
-      var pdfOk=0,pdfFail=0,pdfTooBig=0;
-      for(var pb of parsed._pdfFiles){
-        try{
-          var b64=await new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result.split(',')[1]);};r.onerror=rej;r.readAsDataURL(pb);});
-          if(Math.round(b64.length*0.75)>PDF_ATTACH_MAX_BASE64){pdfTooBig++;continue;}
-          var pr=await invoke('/import-pdf-booking','POST',{
-            tripId:result.tripId,
-            filename:pb.name,
-            base64:b64,
-            mimetype:pb.type||'application/pdf'
-          });
-          if(pr&&pr.ok)pdfOk++;else pdfFail++;
-          await new Promise(function(r){setTimeout(r,500);});
-        }catch(_e){pdfFail++;}
-      }
-      setProgDone('pdfbooks',pdfOk+' PDF'+(pdfOk===1?'':'s')+' attached'+((pdfFail||pdfTooBig)?' ('+(pdfFail+pdfTooBig)+' skipped)':''));
-      if(pdfOk)result.log.push({type:'pdfbooks',message:'Attached '+pdfOk+' original PDF'+(pdfOk===1?'':'s')+' to the trip for reference'});
-      if(pdfTooBig)result.log.push({type:'pdfbooks',message:pdfTooBig+' PDF'+(pdfTooBig===1?'':'s')+' too large to attach as a file — the booking itself was still imported from its text'});
+  // progress.createdRefs is cumulative server-side (every /import round appends to it, never
+  // resets it) — this is the full list already. The PDF-attach/photo-upload loops below run
+  // as separate, non-resumable calls, so their file refs are appended here client-side instead.
+  var importRefs=(progress&&progress.createdRefs)||[];
+
+  steps.forEach(function(s){
+    var ic=document.getElementById('ic-'+s.id);
+    if(ic&&!ic.classList.contains('done')&&!ic.classList.contains('error'))setProgDone(s.id,'Done');
+  });
+
+  // Attach original PDFs to the trip as files (backup for reference — the booking data itself
+  // was already extracted from their text and imported above). The plugin-route proxy 413s on
+  // large request bodies, and a multi-page ticket/QR-code PDF routinely exceeds it, so
+  // oversized PDFs are skipped here rather than sent and rejected — the booking itself already
+  // made it in via the text pipeline either way.
+  if(options.importBookings&&result.tripId&&pdfFiles.length){
+    setProgRunning(kp+'pdfbooks');
+    var PDF_ATTACH_MAX_BASE64=900*1024;
+    var pdfOk=0,pdfFail=0,pdfTooBig=0;
+    for(var pb of pdfFiles){
+      try{
+        var b64=await new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result.split(',')[1]);};r.onerror=rej;r.readAsDataURL(pb);});
+        if(Math.round(b64.length*0.75)>PDF_ATTACH_MAX_BASE64){pdfTooBig++;continue;}
+        var pr=await invoke('/import-pdf-booking','POST',{
+          tripId:result.tripId,filename:pb.name,base64:b64,mimetype:pb.type||'application/pdf'
+        });
+        if(pr&&pr.ok){pdfOk++;if(pr.fileId)importRefs.push({type:'file',id:pr.fileId});}else pdfFail++;
+        await new Promise(function(r){setTimeout(r,500);});
+      }catch(_e){pdfFail++;}
     }
+    setProgDone(kp+'pdfbooks',pdfOk+' PDF'+(pdfOk===1?'':'s')+' attached'+((pdfFail||pdfTooBig)?' ('+(pdfFail+pdfTooBig)+' skipped)':''));
+    if(pdfOk)result.log.push({type:'pdfbooks',message:'Attached '+pdfOk+' original PDF'+(pdfOk===1?'':'s')+' to the trip for reference'});
+    if(pdfTooBig)result.log.push({type:'pdfbooks',message:pdfTooBig+' PDF'+(pdfTooBig===1?'':'s')+' too large to attach as a file — the booking itself was still imported from its text'});
+  }
 
-    // Upload photos one at a time if opted in
-    if(options.importPhotos&&result.tripId&&imgFiles.length){
-      var photoCount=0,photoFailed=0;
-      var photoProgItem=document.createElement('div');photoProgItem.className='prog-item';
-      photoProgItem.innerHTML='<div class="prog-icon running" id="ic-photos">🖼️</div>'+
-        '<div><div class="prog-label">Uploading photos…</div><div class="prog-sub" id="sub-photos">0 / '+imgFiles.length+' done</div></div>';
-      progList.appendChild(photoProgItem);rh();
-      for(var imgF of imgFiles){
+  // Upload this target's own (date-scoped) photos one at a time if opted in.
+  if(options.importPhotos&&result.tripId&&target.imgFiles.length){
+    var photoCount=0,photoFailed=0;
+    var photoProgItem=document.createElement('div');photoProgItem.className='prog-item';
+    photoProgItem.innerHTML='<div class="prog-icon running" id="ic-'+kp+'photos">🖼️</div>'+
+      '<div><div class="prog-label">Uploading photos…</div><div class="prog-sub" id="sub-'+kp+'photos">0 / '+target.imgFiles.length+' done</div></div>';
+    progList.appendChild(photoProgItem);rh();
+    for(var imgF of target.imgFiles){
+      try{
+        var buf=imgF._buffer||await readBuffer(imgF);
+        var pb64=await compressToBase64(buf,imgF.name);
+        var sizeB=Math.round(pb64.length*0.75);
+        if(sizeB>900*1024){photoFailed++;continue;}
+        var pr2=await invoke('/upload-photo','POST',{
+          tripId:result.tripId,
+          photo:{name:imgF.name,base64:pb64,mimetype:'image/jpeg',sizeBytes:sizeB,description:'Imported photo'}
+        });
+        if(pr2&&pr2.ok){photoCount++;if(pr2.fileId)importRefs.push({type:'file',id:pr2.fileId});}else photoFailed++;
+        document.getElementById('sub-'+kp+'photos').textContent=photoCount+' / '+target.imgFiles.length+' done';
+        await new Promise(function(r){setTimeout(r,400);});
+      }catch(_e){photoFailed++;}
+    }
+    var ic=document.getElementById('ic-'+kp+'photos');
+    if(ic){ic.className='prog-icon done';ic.innerHTML='<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';}
+    document.getElementById('sub-'+kp+'photos').textContent=photoCount+' photos uploaded'+(photoFailed?' ('+photoFailed+' skipped)':'');
+    if(photoCount)result.log.push({type:'photos',message:'Uploaded '+photoCount+' photos'+(photoFailed?' ('+photoFailed+' too large)':'')});
+  }
+
+  // Upload each Polarsteps step's own embedded photos, attached to that step's place.
+  // stepPlaceIds only exists inside the /import response (placeId is never persisted outside
+  // that request) — the main loop above already merged every round's progress into `progress`,
+  // so by now it holds every step's placeId across the whole (possibly multi-round) import.
+  var stepPhotoIds=Object.keys(target.stepPhotosByStepId||{});
+  if(options.importPhotos&&result.tripId&&stepPhotoIds.length){
+    var stepPlaceIds=(progress&&progress.stepPlaceIds)||{};
+    var totalStepPhotos=stepPhotoIds.reduce(function(n,id){return n+target.stepPhotosByStepId[id].length;},0);
+    var spCount=0,spFailed=0,spSkipped=0;
+    var spProgItem=document.createElement('div');spProgItem.className='prog-item';
+    spProgItem.innerHTML='<div class="prog-icon running" id="ic-'+kp+'steppics">🧭</div>'+
+      '<div><div class="prog-label">Uploading Polarsteps photos…</div><div class="prog-sub" id="sub-'+kp+'steppics">0 / '+totalStepPhotos+' done</div></div>';
+    progList.appendChild(spProgItem);rh();
+    for(var sid of stepPhotoIds){
+      var placeIdForStep=stepPlaceIds[sid];
+      var stepForName=((target.polarsteps&&target.polarsteps.steps)||[]).find(function(s){return s.id===sid;});
+      for(var spf of target.stepPhotosByStepId[sid]){
+        if(!placeIdForStep){spSkipped++;continue;} // step's place wasn't created (no coords, or import didn't reach it) — nothing to attach to
         try{
-          var buf=imgF._buffer||await readBuffer(imgF);
-          // Compress via canvas
-          var b64=await compressToBase64(buf,imgF.name);
-          var sizeB=Math.round(b64.length*0.75);
-          if(sizeB>900*1024){photoFailed++;continue;}
-          var pr=await invoke('/upload-photo','POST',{
+          var spb64=await compressToBase64(spf._buffer,spf.name);
+          var spSizeB=Math.round(spb64.length*0.75);
+          if(spSizeB>900*1024){spFailed++;continue;}
+          var sppr=await invoke('/upload-photo','POST',{
             tripId:result.tripId,
-            photo:{name:imgF.name,base64:b64,mimetype:'image/jpeg',sizeBytes:sizeB,description:'Imported photo'}
+            photo:{name:spf.name,base64:spb64,mimetype:'image/jpeg',sizeBytes:spSizeB,description:stepForName?('Polarsteps: '+stepForName.name):'Polarsteps photo',placeId:placeIdForStep}
           });
-          if(pr&&pr.ok)photoCount++;else photoFailed++;
-          document.getElementById('sub-photos').textContent=photoCount+' / '+imgFiles.length+' done';
+          if(sppr&&sppr.ok){spCount++;if(sppr.fileId)importRefs.push({type:'file',id:sppr.fileId});}else spFailed++;
+          document.getElementById('sub-'+kp+'steppics').textContent=spCount+' / '+totalStepPhotos+' done';
           await new Promise(function(r){setTimeout(r,400);});
-        }catch(_e){photoFailed++;}
+        }catch(_e){spFailed++;}
       }
-      var ic=document.getElementById('ic-photos');
-      if(ic){ic.className='prog-icon done';ic.innerHTML='<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';}
-      document.getElementById('sub-photos').textContent=photoCount+' photos uploaded'+(photoFailed?' ('+photoFailed+' skipped)':'');
-      if(photoCount)result.log.push({type:'photos',message:'Uploaded '+photoCount+' photos'+(photoFailed?' ('+photoFailed+' too large)':'')});
     }
+    var spIc=document.getElementById('ic-'+kp+'steppics');
+    if(spIc){spIc.className='prog-icon done';spIc.innerHTML='<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';}
+    document.getElementById('sub-'+kp+'steppics').textContent=spCount+' Polarsteps photo'+(spCount===1?'':'s')+' uploaded'+((spFailed||spSkipped)?' ('+(spFailed+spSkipped)+' skipped)':'');
+    if(spCount)result.log.push({type:'steppics',message:'Uploaded '+spCount+' Polarsteps photo'+(spCount===1?'':'s')+', attached to their places'});
+    if(spSkipped)result.log.push({type:'steppics',message:spSkipped+' Polarsteps photo(s) skipped — their step had no place (no coordinates, or Places import was off)'});
+  }
 
-    // Show result banner
-    var banner=document.createElement('div');banner.className='result-banner';banner.style.marginTop='16px';
-    var logHtml=(result.log||[]).map(function(l){
-      var icons={trip:'🗺️',days:'📅',journal:'📔',places:'📍',bookings:'✈️',costs:'💸'};
-      return '<div class="result-item">'+(icons[l.type]||'✓')+' '+escHtml(l.message)+'</div>';
-    }).join('');
-    banner.innerHTML='<div class="result-title"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg> Trip imported successfully</div>'+
-      '<div class="result-items">'+logHtml+'</div>'+
-      ((result.errors||[]).length?'<div style="margin-top:8px;font-size:12px;color:var(--warning);">'+result.errors.length+' warning'+(result.errors.length===1?'':'s')+': '+result.errors.slice(0,2).map(function(e){return e;}).join('; ')+'</div>':'');
-    prog.appendChild(banner);
-    document.getElementById('done-row').style.display='flex';
-    rh();
+  return {ok:true,tripId:result.tripId,refs:importRefs,log:result.log||[],errors:allErrors};
+}
+
+// ── Undo ───────────────────────────────────────────────────────────────────
+// Deletes everything the last import created via /undo-import (places, journal,
+// bookings/accommodations, costs, uploaded files) — but not the trip(s) themselves (no
+// ctx.trips delete) and not the calendar days /import prepared, so undoing is safe to retry
+// and never removes trip structure the user might already be relying on. Loops over every
+// trip the batch touched (window._lastImportBatches), one at a time — /undo-import takes a
+// single tripId, so a multi-journey import needs one pass per trip it created.
+async function doUndoImport(){
+  var batches=(window._lastImportBatches||[]).filter(function(b){return b.tripId&&b.refs&&b.refs.length;});
+  if(!batches.length)return;
+  var totalItems=batches.reduce(function(n,b){return n+b.refs.length;},0);
+  var ok=await trekConfirm(
+    'This permanently deletes everything this import created across '+batches.length+' trip'+(batches.length===1?'':'s')+' — places, journal entries, bookings, accommodations, costs, and uploaded files. The trip(s) themselves and their calendar days are kept. This cannot be undone.',
+    {title:'Undo import?',confirmLabel:'Delete',cancelLabel:'Cancel',danger:true}
+  );
+  if(!ok)return;
+  var btn=document.getElementById('undo-import-btn');
+  if(btn){btn.disabled=true;btn.textContent='Undoing…';}
+  var totalDeleted=0,allErr=[];
+  try{
+    for(var b of batches){
+      // Newest-first per trip: journal entries/places created AFTER the journey/accommodation
+      // they're linked to must be deleted before it, and refs were appended in creation order.
+      var remaining=b.refs.slice().reverse();
+      var rounds=0;
+      while(remaining.length&&rounds<200){
+        rounds++;
+        var r=await invoke('/undo-import','POST',{tripId:b.tripId,refs:remaining});
+        totalDeleted+=r.deleted||0;
+        if(r.errors&&r.errors.length)allErr=allErr.concat(r.errors);
+        remaining=r.remaining||[];
+        if(btn)btn.textContent='Undoing… ('+totalDeleted+'/'+totalItems+')';
+      }
+    }
+    window._lastImportBatches=[];
+    if(btn){
+      btn.textContent='Undone ('+totalDeleted+' item'+(totalDeleted===1?'':'s')+' removed)'+(allErr.length?' — '+allErr.length+' failed':'');
+      btn.disabled=true;
+    }
   }catch(e){
-    prog.innerHTML+='<div class="et">Import failed: '+escHtml(e.message)+'</div>';
-    document.getElementById('done-row').style.display='flex';
-    rh();
+    if(btn){btn.disabled=false;btn.textContent='Undo failed: '+e.message;}
   }
 }
 
@@ -1549,6 +2289,59 @@ async function extractGPS(buffer, filename){
   }
 }
 
+// ── GPX parser (native DOMParser — GPX is plain XML, no vendored library needed) ──
+function parseGPXText(text){
+  var points=[];
+  try{
+    var doc=new DOMParser().parseFromString(text,'text/xml');
+    if(doc.querySelector('parsererror'))return points;
+    // Trackpoints are dense (a long hike/ride can have thousands) — sample to keep the
+    // clustering step below cheap, same idea as the raw Google Timeline 'locations' format.
+    var trkpts=Array.prototype.slice.call(doc.querySelectorAll('trkpt'));
+    var step=Math.max(1,Math.floor(trkpts.length/500));
+    for(var i=0;i<trkpts.length;i+=step){
+      var el=trkpts[i];
+      var lat=parseFloat(el.getAttribute('lat')),lon=parseFloat(el.getAttribute('lon'));
+      if(isNaN(lat)||isNaN(lon))continue;
+      var timeEl=el.querySelector('time');
+      points.push({lat:lat,lng:lon,date:timeEl&&timeEl.textContent?timeEl.textContent.slice(0,10):null,name:null});
+    }
+    // Waypoints are intentional, named POIs — keep every one, never sampled.
+    Array.prototype.forEach.call(doc.querySelectorAll('wpt'),function(el){
+      var lat=parseFloat(el.getAttribute('lat')),lon=parseFloat(el.getAttribute('lon'));
+      if(isNaN(lat)||isNaN(lon))return;
+      var nameEl=el.querySelector('name'),timeEl=el.querySelector('time');
+      points.push({lat:lat,lng:lon,date:timeEl&&timeEl.textContent?timeEl.textContent.slice(0,10):null,name:nameEl?nameEl.textContent.trim():null});
+    });
+  }catch(_e){}
+  return points;
+}
+
+// ── KML parser (native DOMParser) ──────────────────────────────────────────
+function parseKMLText(text){
+  var points=[];
+  try{
+    var doc=new DOMParser().parseFromString(text,'text/xml');
+    if(doc.querySelector('parsererror'))return points;
+    Array.prototype.forEach.call(doc.querySelectorAll('Placemark'),function(pm){
+      var nameEl=pm.querySelector('name');
+      var name=nameEl?nameEl.textContent.trim():null;
+      var whenEl=pm.querySelector('TimeStamp when, TimeSpan begin');
+      var date=whenEl&&whenEl.textContent?whenEl.textContent.slice(0,10):null;
+      var coordEl=pm.querySelector('Point coordinates, LineString coordinates, Polygon coordinates, coordinates');
+      if(!coordEl||!coordEl.textContent)return;
+      // KML coordinate order is lon,lat[,alt] — a LineString/Polygon placemark (a route/area,
+      // not a single pin) becomes ONE point at its first vertex, not one point per vertex.
+      var first=coordEl.textContent.trim().split(/\s+/)[0];
+      var parts=first.split(',');
+      var lon=parseFloat(parts[0]),lat=parseFloat(parts[1]);
+      if(isNaN(lat)||isNaN(lon))return;
+      points.push({lat:lat,lng:lon,date:date,name:name});
+    });
+  }catch(_e){}
+  return points;
+}
+
 // ── File readers ────────────────────────────────────────────────────────────
 function readText(file){
   return new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result);};r.onerror=rej;r.readAsText(file);});
@@ -1588,6 +2381,30 @@ function renderTimelinePreview(body){
     list.appendChild(row);
   });
   if(parsed.timelinePlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.timelinePlaces.length-8)+' more';list.appendChild(m);}
+  body.appendChild(list);
+}
+
+function renderGpxPreview(body){
+  var list=document.createElement('div');list.className='preview-list';
+  parsed.gpxPlaces.slice(0,8).forEach(function(p){
+    var row=document.createElement('div');row.className='preview-item';
+    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
+      '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
+    list.appendChild(row);
+  });
+  if(parsed.gpxPlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.gpxPlaces.length-8)+' more';list.appendChild(m);}
+  body.appendChild(list);
+}
+
+function renderKmlPreview(body){
+  var list=document.createElement('div');list.className='preview-list';
+  parsed.kmlPlaces.slice(0,8).forEach(function(p){
+    var row=document.createElement('div');row.className='preview-item';
+    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
+      '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
+    list.appendChild(row);
+  });
+  if(parsed.kmlPlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.kmlPlaces.length-8)+' more';list.appendChild(m);}
   body.appendChild(list);
 }
 
@@ -1633,9 +2450,12 @@ async function doAIAssist(){
 }
 
 function resetAll(){
-  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[],bookingText:''};
+  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  tripTargets=[];journeyTargets=[];extraTargets=[];unassigned=null;extraTargetSeq=0;
+  window._lastImportBatches=[];
   document.getElementById('prog-content').innerHTML='';
   document.getElementById('done-row').style.display='none';
+  var undoBtn=document.getElementById('undo-import-btn');if(undoBtn)undoBtn.style.display='none';
   document.getElementById('analyze-btn').disabled=false;
   document.getElementById('st1-status').style.display='none';
   goStep(1);

@@ -430,6 +430,107 @@ function detectAirline(flightNum) {
   return codes[prefix] || null
 }
 
+// ── ICS/iCalendar booking extractor ──────────────────────────────────────────
+// Booking confirmations often arrive as a structured .ics VEVENT (DTSTART/DTEND/
+// SUMMARY/LOCATION) rather than free text — parse those fields directly instead
+// of running the regex guesswork above on them.
+function guessBookingType(text) {
+  const t = text || ''
+  if (/\b(hotel|hostel|inn|resort|suites?|lodge|b&b|bed and breakfast|airbnb)\b/i.test(t)) return 'hotel'
+  if (/\b([A-Z]{2}|[A-Z]\d)\s*\d{3,4}\b/.test(t)) return 'flight'
+  if (/\b(flixbus|eurolines|regiojet|blablabus|ouibus|megabus|nationalexpress|intercars|\bbus\b)\b/i.test(t)) return 'bus'
+  if (/\b(intercity|eurostar|thalys|\bice\b|\btgv\b|renfe|trenitalia|db bahn|amtrak|sncf|\bmav\b|öresundståg|oresundstag|resplus|sj ab|\btrain\b|\brail\b)\b/i.test(t)) return 'train'
+  if (/\b(ferry|ferries|cruise)\b/i.test(t)) return 'ferry'
+  return 'transport_other'
+}
+
+// RFC 5545 line folding: a continuation line starts with a single space/tab and
+// must be joined onto the previous line before parsing key:value pairs.
+function icsUnfold(text) {
+  const out = []
+  for (const line of String(text).replace(/\r\n/g, '\n').split('\n')) {
+    if (/^[ \t]/.test(line) && out.length) out[out.length - 1] += line.slice(1)
+    else out.push(line)
+  }
+  return out
+}
+
+// DTSTART/DTEND values look like '20260716T140000Z', '20260716T140000', or a bare
+// '20260716' (VALUE=DATE, all-day). Timezone offset/TZID is intentionally ignored —
+// good enough for slotting the booking onto the right day, not scheduling to the minute.
+function icsDate(value) {
+  const m = String(value || '').match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2}))?/)
+  if (!m) return { date: null, time: null }
+  const [, y, mo, d, h, mi] = m
+  return { date: y + '-' + mo + '-' + d, time: h ? h + ':' + mi : null }
+}
+
+function icsUnescape(s) {
+  return String(s || '').replace(/\\n/gi, ' ').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\')
+}
+
+function parseICS(text) {
+  const lines = icsUnfold(text)
+  const bookings = []
+  let cur = null
+  let idx = 0
+  for (const line of lines) {
+    if (/^BEGIN:VEVENT/i.test(line)) { cur = {}; continue }
+    if (/^END:VEVENT/i.test(line)) {
+      if (cur) {
+        const summary = cur.SUMMARY || 'Event'
+        const location = cur.LOCATION || ''
+        const description = cur.DESCRIPTION || ''
+        const type = guessBookingType(summary + ' ' + location + ' ' + description)
+        const start = icsDate(cur._DTSTART)
+        const end = icsDate(cur._DTEND)
+        // Crude route split from the summary text ("Flight LH123 CPH-FRA", "CPH to FRA …").
+        const routeMatch = /\b([\p{L}][\p{L} .'-]{1,30}?)\s+(?:->|→|to)\s+([\p{L}][\p{L} .'-]{1,30})\b/u.exec(summary)
+        // A real confirmation code in the description/summary ("Booking ref XJ92KD") is more
+        // useful than the calendar event's own UID — prefer it, UID is just the fallback.
+        const refMatch = /\b(?:booking|confirmation|reservation|reference|ref|pnr|code)\b(?:\s*(?:no|nr|number|nummer)\b)?[\s:#.-]{0,4}([A-Z0-9]{4,12})\b/i.exec(summary + ' ' + description)
+        bookings.push({
+          _id: 'ics' + (idx++),
+          type,
+          title: summary,
+          from: routeMatch ? routeMatch[1].trim() : null,
+          from_code: null,
+          from_date: start.date,
+          from_time: start.time,
+          to: routeMatch ? routeMatch[2].trim() : null,
+          to_code: null,
+          to_date: end.date || start.date,
+          to_time: end.time,
+          operator: null,
+          flight_number: null,
+          booking_ref: (refMatch ? refMatch[1].toUpperCase() : null) || cur.UID || null,
+          price: null,
+          currency: null,
+          notes: [location, description].filter(Boolean).join('\n') || null,
+          confidence: 'high',
+          _source: 'ics',
+        })
+      }
+      cur = null
+      continue
+    }
+    if (!cur) continue
+    // KEY;PARAM=..:VALUE — params are ignored (VALUE=DATE is inferred from the value's own
+    // shape in icsDate, TZID's offset is intentionally not applied — see icsDate above).
+    const m = line.match(/^([A-Z-]+)(?:;[^:]*)?:(.*)$/)
+    if (!m) continue
+    const key = m[1].toUpperCase()
+    const val = m[2]
+    if (key === 'SUMMARY') cur.SUMMARY = icsUnescape(val)
+    else if (key === 'LOCATION') cur.LOCATION = icsUnescape(val)
+    else if (key === 'DESCRIPTION') cur.DESCRIPTION = icsUnescape(val)
+    else if (key === 'UID') cur.UID = val
+    else if (key === 'DTSTART') cur._DTSTART = val
+    else if (key === 'DTEND') cur._DTEND = val
+  }
+  return bookings
+}
+
 const BOOKING_PROMPT = `Extract all travel bookings from the text below. Return ONLY valid JSON, no markdown.
 
 {"bookings":[{"type":"flight|hotel|bus|train|transfer|ferry","title":"short title","from":"origin","from_code":"IATA or null","from_date":"YYYY-MM-DD or null","from_time":"HH:MM or null","to":"destination","to_code":"IATA or null","to_date":"YYYY-MM-DD or null","to_time":"HH:MM or null","operator":"name","booking_ref":"ref or null","flight_number":"e.g. SK983 or null","price":0,"currency":"EUR","notes":"notes or null","confidence":"high|medium|low"}],"trip_name":"name or null","summary":"one sentence"}
@@ -440,7 +541,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.4 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.10.0 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -474,6 +575,12 @@ module.exports = definePlugin({
             uuid: String(trip.uuid || trip.id || ''),
             stepCount: steps.length,
             steps: steps.map((s, i) => ({
+              // Polarsteps' own step id — trip.json carries NO photo path/media field at all;
+              // photos live in a sibling ZIP folder named "<slug>_<id>/photos/*" (confirmed
+              // against the community polarsteps-data-parser project's folder-matching logic).
+              // The client uses this id to find that folder and upload its photos once /import
+              // has created this step's place — see doAnalyze()/doImport() in client/index.html.
+              id: s.id != null ? String(s.id) : (s.uuid != null ? String(s.uuid) : null),
               name: (s.name && s.name.trim()) || s.display_name || ('Stop ' + (i + 1)),
               description: (s.description && s.description.trim()) || null,
               date: unixToDate(s.start_time || s.creation_time),
@@ -644,6 +751,37 @@ module.exports = definePlugin({
       },
     },
 
+    // ── Parse ICS/iCalendar bookings (structured VEVENT fields) ──────────────
+    {
+      method: 'POST', path: '/parse-ics', auth: true,
+      async handler(req, ctx) {
+        const text = req.body?.text
+        if (!text) return safeJson(200, { bookings: [] })
+        const result = await tryAttempt(async () => {
+          const bookings = parseICS(text)
+          return { bookings, summary: bookings.length + ' event' + (bookings.length === 1 ? '' : 's') + ' found' }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Cluster raw geo points (client-parsed GPX/KML) ────────────────────────
+    // GPX/KML are XML, so parsing happens client-side (DOMParser) — this route just
+    // does the same proximity clustering + cap that /parse-timeline applies to
+    // Google Timeline points, reused so both sources land on the same places pipeline.
+    {
+      method: 'POST', path: '/parse-geo-points', auth: true,
+      async handler(req, ctx) {
+        const points = Array.isArray(req.body?.points) ? req.body.points : []
+        const result = await tryAttempt(async () => {
+          const clean = points.filter(p => typeof p?.lat === 'number' && typeof p?.lng === 'number' && !isNaN(p.lat) && !isNaN(p.lng))
+          const clusters = clusterByProximity(clean, 500)
+          return { places: clusters.slice(0, 300), totalPoints: clean.length }
+        })
+        return safeJson(200, result)
+      },
+    },
+
     // ── Main import ───────────────────────────────────────────────────────────
     {
       method: 'POST', path: '/import', auth: true,
@@ -675,7 +813,16 @@ module.exports = definePlugin({
             places: 0, placesCreated: 0,
             bookings: 0, bookingsRes: 0, bookingsAcc: 0, bookingsReview: 0,
             costs: 0, costsCreated: 0,
+            // {type, id} refs for everything created this import, newest-last — the source
+            // for /undo-import. Trip/day rows are deliberately never added here (see that
+            // route's comment).
+            createdRefs: [],
             days: 0, daysCreated: 0,
+            // Polarsteps step.id -> the place created for it. The client needs this to attach
+            // a step's own embedded photos (uploaded separately, post-import, via /upload-photo)
+            // to the right place — placeId only ever exists inside this request, so it has to be
+            // handed back out through progress the same way createdRefs is.
+            stepPlaceIds: {},
           }, progressIn || {})
 
           // ── 1. Trip ────────────────────────────────────────────────────────
@@ -722,19 +869,7 @@ module.exports = definePlugin({
               rangeEnd = rangeEnd || tripInfo?.end_date || null
             } catch (_e) {}
           }
-          {
-            // The trip's own declared start/end (from tripConfig, Polarsteps, or an existing
-            // trip record) is NOT guaranteed to cover every date actually present in the
-            // imported data — GPS photos and Google Timeline points routinely fall just outside
-            // a Polarsteps-reported window (a travel day before/after the recorded trip, a
-            // timezone-edge date). A place dated outside the created day-row range has nowhere
-            // to be assigned: dayMap[cluster.date] is undefined and itinerary.assign silently
-            // no-ops, so the place is created but never lands on the itinerary. Confirmed as
-            // the actual cause of "places aren't added to days" even for single, valid dates —
-            // not just the multi-visit clustering issue fixed separately in
-            // clusterByProximity(). So rather than only falling back to the data's own span
-            // when the trip has NO declared range at all, always EXTEND rangeStart/rangeEnd to
-            // cover whatever the imported data spans, on top of whatever's already known.
+          if (!rangeStart || !rangeEnd) {
             // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a single
             // malformed date (e.g. a raw un-normalized CSV cell, or a stray non-date string)
             // sorts unpredictably against real ISO dates and can silently produce a garbage
@@ -751,10 +886,7 @@ module.exports = definePlugin({
             }
             for (const e of (expenses || [])) if (isoDateRe.test(e.date)) allDates.push(e.date)
             allDates.sort()
-            if (allDates.length) {
-              if (!rangeStart || allDates[0] < rangeStart) rangeStart = allDates[0]
-              if (!rangeEnd || allDates[allDates.length - 1] > rangeEnd) rangeEnd = allDates[allDates.length - 1]
-            }
+            if (allDates.length) { rangeStart = rangeStart || allDates[0]; rangeEnd = rangeEnd || allDates[allDates.length - 1] }
           }
 
           // Sanity cap: the data-derived fallback above takes the min/max of every date across
@@ -815,6 +947,7 @@ module.exports = definePlugin({
                 })
                 journeyId = journey?.id ?? journey?.data?.id
                 p.journeyId = journeyId || null
+                if (journeyId) p.createdRefs.push({ type: 'journey', id: journeyId })
               }
               if (journeyId) {
                 let i = p.journal
@@ -844,6 +977,10 @@ module.exports = definePlugin({
                           lng: step.location.lon,
                         })
                         placeId = place?.id ?? place?.data?.id ?? null
+                        if (placeId) {
+                          p.createdRefs.push({ type: 'place', id: placeId })
+                          if (step.id != null) p.stepPlaceIds[step.id] = placeId
+                        }
                       } catch (_e) {}
                       await sleep(80)
                     }
@@ -856,8 +993,10 @@ module.exports = definePlugin({
 
                     const entry = { entry_date: entryDate, title: step.name, content: entryContent }
                     if (placeId) entry.place_id = placeId
-                    await ctx.journal.createEntry(journeyId, entry)
+                    const entryRes = await ctx.journal.createEntry(journeyId, entry)
                     p.journalEntries++
+                    const entryId = entryRes?.id ?? entryRes?.data?.id
+                    if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
 
                     // Linking a place to the journal entry (above) does NOT put it on the trip's
                     // day/itinerary view — that's a separate assignment, easy to forget since the
@@ -869,10 +1008,12 @@ module.exports = definePlugin({
                     // Also add to day notes if day exists for this date
                     if (options.importDayNotes && entryDate && dayMap[entryDate] && step.description) {
                       try {
-                        await ctx.daynotes.create(tripId, dayMap[entryDate], {
+                        const noteRes = await ctx.daynotes.create(tripId, dayMap[entryDate], {
                           content: '**' + step.name + '**\n' + step.description,
                         })
                         p.journalDayNotes++
+                        const noteId = noteRes?.id ?? noteRes?.data?.id
+                        if (noteId) p.createdRefs.push({ type: 'daynote', id: noteId })
                       } catch (_e) {}
                     }
 
@@ -924,6 +1065,7 @@ module.exports = definePlugin({
 
                   // Assign to day if date known
                   const placeId = place?.id ?? place?.data?.id
+                  if (placeId) p.createdRefs.push({ type: 'place', id: placeId })
                   if (placeId && cluster.date && dayMap[cluster.date]) {
                     try { await ctx.itinerary.assign(tripId, dayMap[cluster.date], placeId) } catch (_e) {}
                   }
@@ -967,10 +1109,14 @@ module.exports = definePlugin({
                     place = await ctx.places.create(tripId, { name: hotelName, address: b.to || b.from || undefined })
                   } catch (_e) {}
                   const placeId = place?.id ?? place?.data?.id
+                  if (placeId) p.createdRefs.push({ type: 'place', id: placeId })
                   const startDayId = b.from_date && dayMap[b.from_date]
                   const endDayId = b.to_date && dayMap[b.to_date]
                   if (placeId && startDayId && endDayId) {
-                    await ctx.accommodations.create(tripId, {
+                    // create() also auto-creates the partner hotel reservation — that reservation's
+                    // own id is never returned to us, but deleting the accommodation (below, in
+                    // /undo-import) cascades to remove it too, so only the accommodation needs tracking.
+                    const acc = await ctx.accommodations.create(tripId, {
                       place_id: placeId,
                       start_day_id: startDayId,
                       end_day_id: endDayId,
@@ -980,6 +1126,8 @@ module.exports = definePlugin({
                       notes: b.notes || null,
                     })
                     p.bookingsAcc++
+                    const accId = acc?.id ?? acc?.data?.id
+                    if (accId) p.createdRefs.push({ type: 'accommodation', id: accId })
                   } else {
                     p.bookingsReview++
                     errors.push('Hotel ' + hotelName + ': no matching trip day for check-in/check-out — add it manually')
@@ -1003,8 +1151,10 @@ module.exports = definePlugin({
                     notes: b.notes || null,
                   }
                   if (Object.keys(metadata).length) input.metadata = JSON.stringify(metadata)
-                  await ctx.reservations.create(tripId, input)
+                  const resv = await ctx.reservations.create(tripId, input)
                   p.bookingsRes++
+                  const resvId = resv?.id ?? resv?.data?.id
+                  if (resvId) p.createdRefs.push({ type: 'reservation', id: resvId })
                 }
               } catch (e) { errors.push('Booking ' + b.title + ': ' + e.message) }
             }
@@ -1026,14 +1176,17 @@ module.exports = definePlugin({
               const e = expenses[i]
               try {
                 if (!e.amount || !e.name) continue
-                await ctx.costs.create(tripId, {
+                const cost = await ctx.costs.create(tripId, {
                   name: e.name,
                   total_price: e.amount,
                   currency: e.currency || options?.defaultCurrency || 'EUR',
                   category: e.category || 'other',
                   notes: e.date ? 'Date: ' + e.date : null,
                 })
-                p.costsCreated++; await sleep(80)
+                p.costsCreated++
+                const costId = cost?.id ?? cost?.data?.id
+                if (costId) p.createdRefs.push({ type: 'cost', id: costId })
+                await sleep(80)
               } catch (err) { errors.push('Cost ' + e.name + ': ' + err.message) }
             }
             p.costs = i
@@ -1104,6 +1257,46 @@ module.exports = definePlugin({
             place_id: photo.placeId || undefined,
           })
           return { ok: true, fileId: file?.id ?? file?.data?.id ?? null }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Undo an import ─────────────────────────────────────────────────────────
+    // /import (and the client's own PDF-attach/photo-upload loops) return a `type`+`id`
+    // ref for everything they create. The client sends them back here, newest-first, to
+    // delete them — but NOT the trip itself (ctx.trips has no delete method) and NOT the
+    // calendar day rows /import created (removing those could cascade into content the
+    // user added by hand since the import). Same 6s-budget/resumable shape as /import:
+    // whatever doesn't fit this call comes back in `remaining` for the client to resend.
+    {
+      method: 'POST', path: '/undo-import', auth: true,
+      async handler(req, ctx) {
+        const tripId = Number(req.body?.tripId)
+        const refs = Array.isArray(req.body?.refs) ? req.body.refs : []
+        if (!tripId || !refs.length) return safeJson(200, { done: true, deleted: 0, remaining: [], errors: [] })
+        const result = await tryAttempt(async () => {
+          const deadline = Date.now() + 6000
+          const withinBudget = () => Date.now() < deadline
+          let deleted = 0
+          const errors = []
+          let i = 0
+          for (; i < refs.length; i++) {
+            if (!withinBudget()) break
+            const r = refs[i]
+            try {
+              if (r.type === 'place') await ctx.places.delete(tripId, r.id)
+              else if (r.type === 'reservation') await ctx.reservations.delete(tripId, r.id)
+              else if (r.type === 'accommodation') await ctx.accommodations.delete(tripId, r.id)
+              else if (r.type === 'cost') await ctx.costs.delete(tripId, r.id)
+              else if (r.type === 'file') await ctx.files.softDelete(tripId, r.id)
+              else if (r.type === 'daynote') await ctx.daynotes.delete(tripId, r.id)
+              else if (r.type === 'journalEntry') await ctx.journal.deleteEntry(r.id)
+              else if (r.type === 'journey') await ctx.journal.deleteJourney(r.id)
+              deleted++
+            } catch (e) { errors.push((r.type || 'item') + ' ' + r.id + ': ' + e.message) }
+          }
+          return { deleted, remaining: refs.slice(i), errors, done: i >= refs.length }
         })
         return safeJson(200, result)
       },
