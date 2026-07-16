@@ -1,7 +1,7 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.10.0",
+  "version": "1.13.0",
   "apiVersion": 1,
   "type": "page",
   "trek": ">=3.3.0 <4.0.0",
@@ -13,6 +13,7 @@
   "permissions": [
     "db:read:trips",
     "db:create:trips",
+    "db:write:trips",
     "db:write:journal",
     "db:write:places",
     "db:write:days",
@@ -20,14 +21,24 @@
     "db:write:reservations",
     "db:write:accommodations",
     "db:write:costs",
+    "db:read:files",
     "db:write:files",
     "db:write:daynotes",
     "db:read:daynotes",
     "db:meta",
     "ai:invoke",
-    "http:outbound:nominatim.openstreetmap.org"
+    "hook:photo-provider",
+    "http:outbound:nominatim.openstreetmap.org",
+    "http:outbound:polarsteps.s3.amazonaws.com"
   ],
   "egress": [
-    "nominatim.openstreetmap.org"
+    "nominatim.openstreetmap.org",
+    "polarsteps.s3.amazonaws.com"
+  ],
+  "settings": [
+    { "key": "trek_base_url", "label": "TREK public base URL", "input_type": "text",
+      "scope": "user", "required": false,
+      "placeholder": "https://trek.example.com",
+      "hint": "Only needed for the photo-search feature (lets your imported photos show up in TREK's native photo picker, including for journal entries). Enter the URL you personally access this TREK instance at, under your own Settings — used to turn this plugin's own uploaded-file paths into absolute links. Leave blank to disable photo search for yourself; nothing else in this plugin depends on it." }
   ]
 }

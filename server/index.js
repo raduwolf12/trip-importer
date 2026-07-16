@@ -8,11 +8,43 @@ function safeJson(status, obj) {
 async function tryAttempt(fn) {
   try { return await fn() } catch (e) { return { error: e?.message || String(e) } }
 }
+// For optional/best-effort ctx calls (meta, trips.update cover_image, …) that must never break
+// the surrounding import — swallows both a thrown rejection and the synchronous property-access
+// throw some ctx namespaces raise when unavailable on a given host (hence the thunk: fn must be
+// a closure, not an already-evaluated ctx.foo.bar(...) call, or the throw happens before this
+// runs at all).
+async function attempt(fn, fallback) {
+  try { return await fn() } catch (_e) { return fallback }
+}
+// A trip_files row's created_at format isn't pinned down by the plugin-sdk's loosely-typed
+// TripFile (`[k: string]: unknown`) — could be an epoch-ms number or a SQL-style timestamp
+// string depending on the column. takenAt is purely decorative on a Photo, so never surface
+// "Invalid Date" — just omit it if parsing didn't produce a real date.
+function safeIsoDate(raw) {
+  if (!raw) return undefined
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 function unixToDate(ts) {
   if (!ts) return null
   return new Date(ts * 1000).toISOString().slice(0, 10)
+}
+
+// Polarsteps timestamps are Unix epoch seconds (UTC), but each step also carries its own
+// IANA timezone_id (e.g. "Asia/Shanghai"). Converting straight to UTC via unixToDate() silently
+// puts a late-night/early-morning step on the WRONG calendar day whenever the step's local time
+// and UTC fall on different dates — which then cascades into the wrong day-row/itinerary
+// assignment for that step's place and journal entry. en-CA locale formats as YYYY-MM-DD
+// directly, so no manual reassembly is needed. Falls back to plain UTC if tz is missing/invalid
+// (an unrecognized IANA name throws in Intl.DateTimeFormat's constructor).
+function unixToDateInTz(ts, tz) {
+  if (!ts) return null
+  if (!tz) return unixToDate(ts)
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts * 1000))
+  } catch (_e) { return unixToDate(ts) }
 }
 
 // Normalize a loose date string (various separators/field orders, as found in expense CSVs)
@@ -541,7 +573,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.10.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.13.0 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -573,24 +605,45 @@ module.exports = definePlugin({
             endDate: unixToDate(trip.end_date),
             totalKm: trip.total_km ? Math.round(trip.total_km) : null,
             uuid: String(trip.uuid || trip.id || ''),
+            // The trip's own free-text narrative and cover photo — both previously discarded
+            // entirely. coverPhotoUrl prefers cover_photo_path (Polarsteps' own "large_thumb"
+            // rendition — a reasonable size for a trip cover banner) over the full-res original
+            // (cover_photo.path, likely far larger than needed) or the small thumbnail.
+            summary: (trip.summary && trip.summary.trim()) || null,
+            coverPhotoUrl: trip.cover_photo_path || trip.cover_photo?.large_thumbnail_path || trip.cover_photo?.path || null,
             stepCount: steps.length,
-            steps: steps.map((s, i) => ({
-              // Polarsteps' own step id — trip.json carries NO photo path/media field at all;
-              // photos live in a sibling ZIP folder named "<slug>_<id>/photos/*" (confirmed
-              // against the community polarsteps-data-parser project's folder-matching logic).
-              // The client uses this id to find that folder and upload its photos once /import
-              // has created this step's place — see doAnalyze()/doImport() in client/index.html.
-              id: s.id != null ? String(s.id) : (s.uuid != null ? String(s.uuid) : null),
-              name: (s.name && s.name.trim()) || s.display_name || ('Stop ' + (i + 1)),
-              description: (s.description && s.description.trim()) || null,
-              date: unixToDate(s.start_time || s.creation_time),
-              weather: s.weather_condition ? { condition: s.weather_condition, tempC: s.weather_temperature ?? null } : null,
-              location: s.location ? {
-                name: s.location.full_detail || s.location.name || null,
-                lat: typeof s.location.lat === 'number' ? s.location.lat : null,
-                lon: typeof s.location.lon === 'number' ? s.location.lon : null,
-              } : null,
-            })),
+            steps: steps.map((s, i) => {
+              const tz = s.timezone_id || null
+              const date = unixToDateInTz(s.start_time || s.creation_time, tz)
+              // A step can span multiple calendar days (e.g. a week-long stay) — end_time was
+              // previously never read at all, so every day after the start date showed nothing
+              // on the itinerary for that stay. Only set when it's a genuinely later day, so a
+              // same-day end_time doesn't trigger the multi-day assignment path in /import for no reason.
+              const endDate = unixToDateInTz(s.end_time, tz)
+              return {
+                // Polarsteps' own step id — trip.json itself carries no LOCAL photo path (photos
+                // live in a sibling ZIP folder named "<slug>_<id>/photos/*", confirmed against the
+                // community polarsteps-data-parser project's folder-matching logic) — but it CAN
+                // carry a direct CDN url for the step's own designated cover photo
+                // (main_media_item_path, mediaUrl below), which /import uses as a fallback when no
+                // local ZIP photo was found for this step (e.g. a bare trip.json with no full ZIP
+                // export). The client uses this id to find the ZIP's sibling photo folder and
+                // upload its photos once /import has created this step's place — see
+                // doAnalyze()/doImport() in client/index.html.
+                id: s.id != null ? String(s.id) : (s.uuid != null ? String(s.uuid) : null),
+                name: (s.name && s.name.trim()) || s.display_name || ('Stop ' + (i + 1)),
+                description: (s.description && s.description.trim()) || null,
+                date,
+                endDate: endDate && endDate > date ? endDate : null,
+                weather: s.weather_condition ? { condition: s.weather_condition, tempC: s.weather_temperature ?? null } : null,
+                mediaUrl: s.main_media_item_path || null,
+                location: s.location ? {
+                  name: s.location.full_detail || s.location.name || null,
+                  lat: typeof s.location.lat === 'number' ? s.location.lat : null,
+                  lon: typeof s.location.lon === 'number' ? s.location.lon : null,
+                } : null,
+              }
+            }),
           }
         })
         return safeJson(200, result)
@@ -825,10 +878,98 @@ module.exports = definePlugin({
             stepPlaceIds: {},
           }, progressIn || {})
 
+          // ── 0. Journal-only mode — a standalone journey, no trip at all ────
+          // ctx.journal.createJourney's trip_ids is OPTIONAL (confirmed against TREK's actual
+          // plugin-sdk/src/index.ts type: `trip_ids?: number[]`), so a Journey can exist with
+          // no associated trip. options.journalOnly skips trip creation and every trip-scoped
+          // section entirely — places/days/itinerary/bookings/costs all need a tripId, and
+          // ctx.files/ctx.meta are trip-scoped too, so photo uploads and duplicate-import
+          // detection don't apply here either. This is for a user who just wants a travel
+          // story/journal from their data without engaging the full trip-planning machinery
+          // (day rows, itinerary assignment, a place per stop on a map, etc).
+          if (options?.journalOnly) {
+            const steps = polarsteps?.steps || []
+            if (!polarsteps || !options?.importJournal) {
+              // Must mark done — otherwise the client's resumable loop (which only stops on
+              // progress.done) would keep resending this exact same no-op call up to its 200-round cap.
+              return { ok: true, tripId: null, log: [{ type: 'journal', message: 'Nothing to import — journal-only mode needs a Polarsteps trip with journal import enabled' }], errors: [], progress: { ...p, done: true } }
+            }
+            let journeyId = p.journeyId
+            if (!journeyId) {
+              try {
+                const journey = await ctx.journal.createJourney({
+                  title: polarsteps.name,
+                  subtitle: polarsteps.totalKm ? polarsteps.totalKm.toLocaleString() + ' km travelled' : null,
+                })
+                journeyId = journey?.id ?? journey?.data?.id
+                p.journeyId = journeyId || null
+                if (journeyId) p.createdRefs.push({ type: 'journey', id: journeyId })
+                if (journeyId && polarsteps.summary) {
+                  try {
+                    const introRes = await ctx.journal.createEntry(journeyId, {
+                      entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
+                      title: 'Trip overview',
+                      content: polarsteps.summary,
+                    })
+                    p.journalEntries++
+                    const introId = introRes?.id ?? introRes?.data?.id
+                    if (introId) p.createdRefs.push({ type: 'journalEntry', id: introId })
+                  } catch (e) { errors.push('Trip overview entry: ' + e.message) }
+                }
+              } catch (e) { errors.push('Journal: ' + e.message) }
+            }
+            if (journeyId && p.journal < steps.length) {
+              let i = p.journal
+              for (; i < steps.length; i++) {
+                if (!withinBudget()) break
+                const step = steps[i]
+                try {
+                  const weatherNote = step.weather
+                    ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
+                    : ''
+                  const entryDate = step.date || polarsteps.startDate
+                  const entryRes = await ctx.journal.createEntry(journeyId, {
+                    entry_date: entryDate, title: step.name, content: (step.description || '') + weatherNote,
+                  })
+                  p.journalEntries++
+                  const entryId = entryRes?.id ?? entryRes?.data?.id
+                  if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                  await sleep(100)
+                } catch (e) { errors.push('Step ' + step.name + ': ' + e.message) }
+              }
+              p.journal = i
+            } else if (!journeyId) {
+              p.journal = steps.length // couldn't create/find a journey — don't retry forever
+            }
+            let msg = 'Created journal with ' + p.journalEntries + ' entries'
+            if (p.journal < steps.length) msg += ' (' + (steps.length - p.journal) + ' more queued)'
+            log.push({ type: 'journal', message: msg })
+            p.done = p.journal >= steps.length
+            return { ok: true, tripId: null, log, errors, progress: p }
+          }
+
           // ── 1. Trip ────────────────────────────────────────────────────────
           if (tripConfig.mode === 'existing') {
             tripId = Number(tripConfig.tripId)
           } else {
+            // Detect re-importing a Polarsteps trip that's already been imported before, via its
+            // own stable uuid (parsed by /parse-polarsteps but previously never used for
+            // anything). Without this, re-running the same export — e.g. after tweaking import
+            // options — silently creates a second, duplicate trip. Only checked on a genuinely
+            // fresh call (no progress yet, so tripConfig is still {mode:'new'} rather than the
+            // {mode:'existing', tripId} every resumed round switches to) and only when the client
+            // hasn't already confirmed proceeding anyway (tripConfig.forceDuplicate) — so this
+            // can't re-trigger mid-import once a trip exists.
+            if (polarsteps?.uuid && !progressIn && !tripConfig.forceDuplicate) {
+              const mine = await attempt(() => ctx.trips.listMine(), [])
+              for (const t of (mine || []).slice(0, 200)) {
+                const existingUuid = await attempt(() => ctx.meta.get('trip', t.id, 'polarsteps_uuid'))
+                if (existingUuid && existingUuid === polarsteps.uuid) {
+                  return { ok: true, duplicateOf: { tripId: t.id, title: t.title || null }, log, errors, progress: p }
+                }
+              }
+            }
+
             const newTrip = await ctx.trips.create({
               title: tripConfig.title || polarsteps?.name || 'Imported Trip',
               start_date: tripConfig.startDate || polarsteps?.startDate || null,
@@ -837,6 +978,26 @@ module.exports = definePlugin({
             tripId = newTrip?.id ?? newTrip?.data?.id
             if (!tripId) throw new Error('Failed to create trip')
             log.push({ type: 'trip', message: 'Created trip: ' + (tripConfig.title || polarsteps?.name) })
+
+            if (polarsteps?.uuid) await attempt(() => ctx.meta.set('trip', tripId, 'polarsteps_uuid', polarsteps.uuid))
+
+            // Import the trip's own Polarsteps cover photo, best-effort. The exact shape
+            // ctx.trips.update expects for cover_image isn't documented beyond the permission
+            // name (trip_cover_upload) — a data: URI is the closest match to how every other
+            // upload in this plugin works (ctx.files.create's content_base64) — so this is
+            // wrapped defensively and never blocks the rest of the import if the shape is wrong
+            // or the fetch fails.
+            if (polarsteps?.coverPhotoUrl) {
+              try {
+                const resp = await fetch(polarsteps.coverPhotoUrl)
+                if (resp.ok) {
+                  const buf = Buffer.from(await resp.arrayBuffer())
+                  const contentType = resp.headers.get('content-type') || 'image/jpeg'
+                  await ctx.trips.update(tripId, { cover_image: 'data:' + contentType + ';base64,' + buf.toString('base64') })
+                  log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' })
+                }
+              } catch (e) { errors.push('Cover photo: ' + e.message) }
+            }
           }
 
           // Build a date→dayId map for day note/itinerary assignment
@@ -948,6 +1109,24 @@ module.exports = definePlugin({
                 journeyId = journey?.id ?? journey?.data?.id
                 p.journeyId = journeyId || null
                 if (journeyId) p.createdRefs.push({ type: 'journey', id: journeyId })
+
+                // The trip's own free-text narrative (trip.summary) was previously parsed
+                // nowhere and discarded entirely. Added as an intro entry dated to the trip's
+                // first day, created here alongside the journey itself — this whole block only
+                // ever runs once (guarded by `!journeyId` above), so a resumed round can't
+                // duplicate it the way a separate progress flag would need extra bookkeeping for.
+                if (journeyId && polarsteps.summary) {
+                  try {
+                    const introRes = await ctx.journal.createEntry(journeyId, {
+                      entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
+                      title: 'Trip overview',
+                      content: polarsteps.summary,
+                    })
+                    p.journalEntries++
+                    const introId = introRes?.id ?? introRes?.data?.id
+                    if (introId) p.createdRefs.push({ type: 'journalEntry', id: introId })
+                  } catch (e) { errors.push('Trip overview entry: ' + e.message) }
+                }
               }
               if (journeyId) {
                 let i = p.journal
@@ -1003,6 +1182,30 @@ module.exports = definePlugin({
                     // place still looks "imported" either way.
                     if (placeId && entryDate && dayMap[entryDate]) {
                       try { await ctx.itinerary.assign(tripId, dayMap[entryDate], placeId) } catch (_e) {}
+
+                      // A step can span multiple calendar days (step.endDate, from Polarsteps'
+                      // own end_time — e.g. a week-long stay somewhere) — assign the same place
+                      // to every day in that range too, not just the day the step "started" on,
+                      // otherwise every day after day one of a multi-day stay showed nothing on
+                      // the itinerary even though the place was genuinely there the whole time.
+                      // Capped at 60 days as a sanity limit (mirrors the trip-wide 400-day cap
+                      // elsewhere) — this loop runs inside a single step's own iteration rather
+                      // than as its own resumable section, so an implausibly long span could
+                      // still eat into this round's remaining budget.
+                      if (step.endDate) {
+                        try {
+                          const d = new Date(entryDate + 'T00:00:00Z')
+                          const end = new Date(step.endDate + 'T00:00:00Z')
+                          d.setUTCDate(d.getUTCDate() + 1)
+                          for (let n = 0; d <= end && n < 60; d.setUTCDate(d.getUTCDate() + 1), n++) {
+                            const dateStr = d.toISOString().slice(0, 10)
+                            if (dayMap[dateStr]) {
+                              try { await ctx.itinerary.assign(tripId, dayMap[dateStr], placeId) } catch (_e) {}
+                              await sleep(60)
+                            }
+                          }
+                        } catch (_e) {}
+                      }
                     }
 
                     // Also add to day notes if day exists for this date
@@ -1272,12 +1475,17 @@ module.exports = definePlugin({
     {
       method: 'POST', path: '/undo-import', auth: true,
       async handler(req, ctx) {
-        const tripId = Number(req.body?.tripId)
+        // tripId is optional — a journal-only import (options.journalOnly) never creates a
+        // trip at all, so its refs are only ever 'journey'/'journalEntry', neither of which
+        // ctx.journal.deleteEntry/deleteJourney take a tripId for. Every OTHER ref type is
+        // still trip-scoped and guarded below.
+        const tripId = req.body?.tripId != null ? Number(req.body.tripId) : null
         const refs = Array.isArray(req.body?.refs) ? req.body.refs : []
-        if (!tripId || !refs.length) return safeJson(200, { done: true, deleted: 0, remaining: [], errors: [] })
+        if (!refs.length) return safeJson(200, { done: true, deleted: 0, remaining: [], errors: [] })
         const result = await tryAttempt(async () => {
           const deadline = Date.now() + 6000
           const withinBudget = () => Date.now() < deadline
+          const tripScopedTypes = ['place', 'reservation', 'accommodation', 'cost', 'file', 'daynote']
           let deleted = 0
           const errors = []
           let i = 0
@@ -1285,6 +1493,7 @@ module.exports = definePlugin({
             if (!withinBudget()) break
             const r = refs[i]
             try {
+              if (tripScopedTypes.includes(r.type) && !tripId) throw new Error('no trip id for a ' + r.type + ' ref')
               if (r.type === 'place') await ctx.places.delete(tripId, r.id)
               else if (r.type === 'reservation') await ctx.reservations.delete(tripId, r.id)
               else if (r.type === 'accommodation') await ctx.accommodations.delete(tripId, r.id)
@@ -1302,4 +1511,87 @@ module.exports = definePlugin({
       },
     },
   ],
+
+  // ── photoProvider hook ──────────────────────────────────────────────────────
+  // Confirmed against TREK's actual source (plugin-sdk/src/index.ts + the real
+  // plugin-photos.controller.ts that consumes this hook — the trek-plugin-dev skill's own
+  // docs only had a one-line description, not the interface): implementing this makes every
+  // photo this plugin has ever uploaded via ctx.files.create() (Polarsteps step photos, GPS
+  // photos, the CDN-fallback photos, everything from doImport()'s photo-upload loops)
+  // searchable and pickable directly from TREK's native photo picker — including, per the
+  // controller's own comment ("the picker fans these into its 'plugin sources' tab"), the
+  // picker used when adding a photo to a journal entry. This is the actual fix for "get
+  // imported photos into the Journey view": not by creating gallery records ourselves (no
+  // ctx API for that — see the CLAUDE.md platform-gap note), but by making our own uploaded
+  // files choosable through the same native UI that already lets a user attach any photo.
+  //
+  // hooks run with an acting user bound (confirmed: the controller calls invokeHook(...,
+  // userId, 5000) — same as a route handler), so ctx.trips/ctx.files work here. But every
+  // returned Photo.thumbnailUrl/fullUrl MUST be an absolute http(s) URL — TREK's controller
+  // validates with `new URL(raw)`, which throws (and silently drops the photo) on a bare
+  // relative path. ctx.files.create()/list() already return a relative `url` field
+  // (`/api/trips/<tripId>/files/<fileId>/download` — confirmed in server/src/services/
+  // fileService.ts's formatFile()), and that download route "accepts a cookie, a Bearer
+  // header OR a one-shot ?token= param" (confirmed in files-download.controller.ts) — so a
+  // plain <img> tag rendered inside the user's own already-logged-in TREK tab loads it fine
+  // via the existing session cookie, no token needed. The one piece a plugin has no way to
+  // know on its own is TREK's own public base URL (nothing in `ctx` exposes it) — hence the
+  // `trek_base_url` setting below. scope:'user' (not 'instance') so each user fills in their
+  // own value with no admin involvement required — read here via ctx.settings.get(), the
+  // acting user's own decrypted value (unlike ctx.config, which only surfaces instance-scoped
+  // settings). Same underlying reason TREK's own APP_URL env var exists for OIDC, just
+  // per-user instead of instance-wide here. Left unset, search()/getById() both return
+  // nothing for that user rather than emitting broken (relative) URLs TREK would just drop.
+  hooks: {
+    photoProvider: {
+      async search(query, opts, ctx) {
+        const baseUrl = String((await attempt(() => ctx.settings.get('trek_base_url'))) || '').replace(/\/+$/, '')
+        if (!baseUrl) return { photos: [], total: 0, hasMore: false }
+        const q = String(query || '').trim().toLowerCase()
+        const page = Math.max(1, Number(opts?.page) || 1)
+        const limit = Math.max(1, Math.min(60, Number(opts?.limit) || 30))
+
+        const trips = await attempt(() => ctx.trips.listMine(), [])
+        const all = []
+        // Bounded on two axes (trips scanned, files per trip) — this hook has a hard 5s
+        // host-side timeout (confirmed in plugin-photos.controller.ts), and ctx.files.list is
+        // its own RPC round trip per trip.
+        for (const t of (trips || []).slice(0, 25)) {
+          const files = await attempt(() => ctx.files.list(t.id), [])
+          for (const f of (files || []).slice(0, 200)) {
+            if (!f.mime_type || !String(f.mime_type).startsWith('image/')) continue
+            const name = f.original_name || f.description || ''
+            if (q && !String(name).toLowerCase().includes(q) && !String(f.description || '').toLowerCase().includes(q)) continue
+            if (!f.url) continue
+            all.push({
+              id: t.id + ':' + f.id,
+              title: f.description || f.original_name || undefined,
+              thumbnailUrl: baseUrl + f.url,
+              fullUrl: baseUrl + f.url,
+              takenAt: safeIsoDate(f.created_at),
+            })
+          }
+        }
+        const start = (page - 1) * limit
+        return { photos: all.slice(start, start + limit), total: all.length, hasMore: start + limit < all.length }
+      },
+      async getById(id, ctx) {
+        const baseUrl = String((await attempt(() => ctx.settings.get('trek_base_url'))) || '').replace(/\/+$/, '')
+        if (!baseUrl) return null
+        const [tripIdStr, fileIdStr] = String(id).split(':')
+        const tripId = Number(tripIdStr); const fileId = Number(fileIdStr)
+        if (!tripId || !fileId) return null
+        const files = await attempt(() => ctx.files.list(tripId), [])
+        const f = (files || []).find(x => Number(x.id) === fileId)
+        if (!f || !f.url) return null
+        return {
+          id,
+          title: f.description || f.original_name || undefined,
+          thumbnailUrl: baseUrl + f.url,
+          fullUrl: baseUrl + f.url,
+          takenAt: safeIsoDate(f.created_at),
+        }
+      },
+    },
+  },
 })

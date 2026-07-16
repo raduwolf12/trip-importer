@@ -878,6 +878,16 @@ select.field-input{cursor:pointer;}
     <div style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">Each selected journey becomes its own trip, scoped to its own dates.</div>
     <div id="trip-targets-list"></div>
   </div>
+  <!-- Journal-only mode: a standalone journey with no trip plan at all — trip_ids on
+       ctx.journal.createJourney is optional, so this is a real, separately-supported import
+       shape, not a subset of the normal one. Placed above "What to import" since checking it
+       makes the Trip section and every other checkbox below irrelevant (all handled in
+       toggleJournalOnly()). -->
+  <div class="opt-item" id="opt-journal-only-wrap" style="margin-bottom:14px;">
+    <input type="checkbox" id="opt-journal-only" onchange="toggleJournalOnly()"/>
+    <label for="opt-journal-only">📔 Journal only — just the story, no trip plan</label>
+  </div>
+  <div id="journal-only-hint" style="display:none;font-size:11px;color:var(--text-faint);margin:-8px 0 14px;">Creates a standalone journal from your Polarsteps data — no trip, no places, no days, no bookings/costs. Good for a travel story you don't need to plan around.</div>
   <!-- What to import -->
   <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">What to import</div>
   <div class="opts-grid">
@@ -1641,12 +1651,14 @@ async function prepareStep3(){
   // (unassigned data still needs these toggles available so it can actually be imported once assigned).
   var un=unassigned||{bookings:[],expenses:[],gpsPlaces:[],timelinePlaces:[]};
   var anyJourney=tripTargets.some(function(t){return !!t.polarsteps;});
+  setOptAvail('opt-journal-only-wrap',anyJourney);
   setOptAvail('opt-journal-wrap',anyJourney);
   setOptAvail('opt-places-wrap',tripTargets.some(function(t){return !!t.polarsteps||t.gpsPlaces.length||t.timelinePlaces.length;})||un.gpsPlaces.length>0||un.timelinePlaces.length>0);
   setOptAvail('opt-bookings-wrap',tripTargets.some(function(t){return t.bookings.length>0;})||un.bookings.length>0);
   setOptAvail('opt-costs-wrap',tripTargets.some(function(t){return t.expenses.length>0;})||un.expenses.length>0);
   setOptAvail('opt-daynotes-wrap',anyJourney);
   setOptAvail('opt-photos-wrap',imgFiles.length>0);
+  toggleJournalOnly(); // resync dependent checkbox disabled-states in case availability just changed
 
   // Pre-select the most common currency actually detected in the source data (falls back to
   // the dropdown's own default, EUR, if none was found).
@@ -1911,6 +1923,34 @@ function setOptAvail(id,avail){
   if(!avail)el.querySelector('input').checked=false;
 }
 
+// Journal-only mode creates a standalone journey with no trip at all — ctx.journal.createJourney's
+// trip_ids is optional, so this is a genuinely different import shape, not a subset of the
+// normal one. Every other "what to import" toggle (places/bookings/costs/day notes/photos) is
+// trip-scoped and meaningless here, and the Trip section (new/existing) doesn't apply either —
+// so checking this forces journal on, forces everything else off+disabled, and hides Trip.
+// Turning it back off just re-enables those toggles (their real availability, based on what
+// data actually exists, is re-applied separately by the setOptAvail() calls in
+// prepareStep3()/renderTripTargets() — this function only knows about the journalOnly override).
+function toggleJournalOnly(){
+  var on=document.getElementById('opt-journal-only').checked;
+  ['opt-places-wrap','opt-bookings-wrap','opt-costs-wrap','opt-daynotes-wrap','opt-photos-wrap'].forEach(function(id){
+    var el=document.getElementById(id);
+    var input=el.querySelector('input');
+    if(on){el.classList.add('disabled');input.disabled=true;input.checked=false;}
+    else{el.classList.remove('disabled');input.disabled=false;}
+  });
+  var journalOpt=document.getElementById('opt-journal');
+  if(on)journalOpt.checked=true;
+  journalOpt.disabled=on;
+  // Same "which trip UI is showing" condition prepareStep3() uses — Trip is irrelevant in
+  // journal-only mode either way, so hide whichever one would otherwise be visible.
+  var showClassic=tripTargets.length<=1&&!unassignedHasContent();
+  document.getElementById('single-trip-config').style.display=on?'none':(showClassic?'':'none');
+  document.getElementById('multi-trip-config').style.display=on?'none':(showClassic?'none':'');
+  document.getElementById('journal-only-hint').style.display=on?'':'none';
+  if(on)document.getElementById('currency-wrap').style.display='none';
+}
+
 function setTripMode(mode){
   tripMode=mode;
   document.getElementById('tm-new').className='tmode-btn'+(mode==='new'?' active':'');
@@ -1922,6 +1962,10 @@ function setTripMode(mode){
 
 // ── Import ─────────────────────────────────────────────────────────────────
 async function doImport(){
+  // Read this first — journal-only mode skips trip creation entirely, so none of the
+  // trip-mode/existing-trip-selection plumbing below actually matters for it.
+  var journalOnly=document.getElementById('opt-journal-only').checked;
+
   // The classic single-trip case (exactly one target AND nothing unassigned — see prepareStep3())
   // is configured through the classic step-3 fields (#trip-title/#trip-start/#trip-end/
   // #trip-select, tripMode) rather than a rendered target card — those fields are never wired
@@ -1945,7 +1989,7 @@ async function doImport(){
   // assigned to it — an unused "+ Add another trip" card is silently skipped, not imported empty.
   var activeTargets=tripTargets.filter(function(t){return t.kind==='journey'||targetHasContent(t);});
   if(!activeTargets.length){alert('Nothing to import — no trip has any data assigned.');return;}
-  for(var chk of activeTargets){
+  if(!journalOnly)for(var chk of activeTargets){
     if(chk.mode==='existing'&&!chk.existingTripId){alert('Please select a trip for "'+chk.label+'".');return;}
   }
 
@@ -1967,6 +2011,7 @@ async function doImport(){
     importDayNotes:document.getElementById('opt-daynotes').checked,
     importPhotos:document.getElementById('opt-photos').checked,
     defaultCurrency:document.getElementById('opt-currency').value||'EUR',
+    journalOnly:journalOnly,
   };
 
   goStep(4);
@@ -2037,7 +2082,12 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     {mode:'new',title:target.title||'Imported Trip',startDate:target.startDate||null,endDate:target.endDate||null};
   var pdfFiles=isPdfTarget?(parsed._pdfFiles||[]):[];
 
-  var steps=[
+  // Journal-only mode never creates a trip at all (ctx.journal.createJourney's trip_ids is
+  // optional) — every trip-scoped step (trip/days/places/bookings/pdf-attach/costs) is
+  // skipped, since none of them apply without a tripId.
+  var steps=options.journalOnly?[
+    options.importJournal&&target.polarsteps?{id:kp+'journal',label:'Creating journal entries ('+target.polarsteps.stepCount+' stops)',icon:'📔'}:null,
+  ].filter(Boolean):[
     {id:kp+'trip',label:target.mode==='new'?'Creating trip':'Linking to trip',icon:'🗺️'},
     (options.importJournal||options.importPlaces||options.importBookings)?{id:kp+'days',label:'Preparing trip calendar days',icon:'📅'}:null,
     options.importJournal&&target.polarsteps?{id:kp+'journal',label:'Creating journal entries ('+target.polarsteps.stepCount+' stops)',icon:'📔'}:null,
@@ -2054,7 +2104,8 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     progList.appendChild(item);
   });
   rh();
-  setProgRunning(kp+'trip');
+  if(options.journalOnly)setProgRunning(kp+'journal');
+  else setProgRunning(kp+'trip');
 
   // /import is index-resumable: the real per-call budget is much tighter than the platform's
   // documented 30s (TREK's own trek:invoke bridge enforces ~8s round-trip) — a single call
@@ -2073,6 +2124,21 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   do{
     round++;
     result=await invoke('/import','POST',Object.assign({tripConfig:tripConfig,progress:progress},importBody));
+
+    // A brand-new-trip import can detect it's re-importing a Polarsteps trip that was already
+    // imported before (matched by the trip's own stable uuid, stored via ctx.meta the first
+    // time) — the server returns {duplicateOf:{tripId,title}} instead of creating anything, on
+    // this very first round only (before tripId/progress even exist yet). Ask once whether to
+    // proceed anyway; if so, resend with forceDuplicate so the server skips the check next time.
+    if(result.duplicateOf){
+      var dupTitle=result.duplicateOf.title||('trip #'+result.duplicateOf.tripId);
+      var proceedAnyway=window.confirm('This Polarsteps trip looks like it was already imported as "'+dupTitle+'". Import it again as a separate new trip anyway?');
+      if(!proceedAnyway)throw new Error('Skipped — already imported as "'+dupTitle+'"');
+      tripConfig=Object.assign({},tripConfig,{forceDuplicate:true});
+      progress={}; // keep the while-condition below safe (progress starts undefined) without marking done
+      continue;
+    }
+
     tripConfig={mode:'existing',tripId:result.tripId};
     progress=result.progress||{done:true};
     // result.log messages are cumulative totals (server-side), safe to just redisplay each round.
@@ -2082,7 +2148,7 @@ async function importOneTarget(target,options,progList,isPdfTarget){
       if(l.type==='trip'||progress.done)setProgDone(kp+l.type,l.message);
       else setProgUpdate(kp+l.type,l.message);
     });
-    if(!progress.done)setProgUpdate(kp+'trip','Resuming — round '+(round+1)+'…');
+    if(!progress.done)setProgUpdate(kp+(options.journalOnly?'journal':'trip'),'Resuming — round '+(round+1)+'…');
     rh();
   }while(!progress.done&&round<200);
   if(round>=200)allErrors.push('Import stopped after 200 rounds — please report this');
@@ -2102,9 +2168,16 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // large request bodies, and a multi-page ticket/QR-code PDF routinely exceeds it, so
   // oversized PDFs are skipped here rather than sent and rejected — the booking itself already
   // made it in via the text pipeline either way.
+  //
+  // The proxy's real body-size ceiling is undocumented, and a photo/PDF upload was confirmed
+  // (against a real TREK instance) to still 413 under the previous 900KB target — so that
+  // number was never actually a safe margin, just "well under 10MB". These caps are set much
+  // lower as a defensive correction; PHOTO_UPLOAD_MAX_BASE64 also drives compressUnderCap()'s
+  // shrink-retry ladder above, since (unlike a PDF) a photo can still be shrunk further to fit.
+  var PDF_ATTACH_MAX_BASE64=300*1024;
+  var PHOTO_UPLOAD_MAX_BASE64=250*1024;
   if(options.importBookings&&result.tripId&&pdfFiles.length){
     setProgRunning(kp+'pdfbooks');
-    var PDF_ATTACH_MAX_BASE64=900*1024;
     var pdfOk=0,pdfFail=0,pdfTooBig=0;
     for(var pb of pdfFiles){
       try{
@@ -2132,12 +2205,11 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     for(var imgF of target.imgFiles){
       try{
         var buf=imgF._buffer||await readBuffer(imgF);
-        var pb64=await compressToBase64(buf,imgF.name);
-        var sizeB=Math.round(pb64.length*0.75);
-        if(sizeB>900*1024){photoFailed++;continue;}
+        var compressed=await compressUnderCap(buf,imgF.name,PHOTO_UPLOAD_MAX_BASE64);
+        if(!compressed){photoFailed++;continue;}
         var pr2=await invoke('/upload-photo','POST',{
           tripId:result.tripId,
-          photo:{name:imgF.name,base64:pb64,mimetype:'image/jpeg',sizeBytes:sizeB,description:'Imported photo'}
+          photo:{name:imgF.name,base64:compressed.base64,mimetype:'image/jpeg',sizeBytes:compressed.sizeBytes,description:'Imported photo'}
         });
         if(pr2&&pr2.ok){photoCount++;if(pr2.fileId)importRefs.push({type:'file',id:pr2.fileId});}else photoFailed++;
         document.getElementById('sub-'+kp+'photos').textContent=photoCount+' / '+target.imgFiles.length+' done';
@@ -2169,12 +2241,11 @@ async function importOneTarget(target,options,progList,isPdfTarget){
       for(var spf of target.stepPhotosByStepId[sid]){
         if(!placeIdForStep){spSkipped++;continue;} // step's place wasn't created (no coords, or import didn't reach it) — nothing to attach to
         try{
-          var spb64=await compressToBase64(spf._buffer,spf.name);
-          var spSizeB=Math.round(spb64.length*0.75);
-          if(spSizeB>900*1024){spFailed++;continue;}
+          var spCompressed=await compressUnderCap(spf._buffer,spf.name,PHOTO_UPLOAD_MAX_BASE64);
+          if(!spCompressed){spFailed++;continue;}
           var sppr=await invoke('/upload-photo','POST',{
             tripId:result.tripId,
-            photo:{name:spf.name,base64:spb64,mimetype:'image/jpeg',sizeBytes:spSizeB,description:stepForName?('Polarsteps: '+stepForName.name):'Polarsteps photo',placeId:placeIdForStep}
+            photo:{name:spf.name,base64:spCompressed.base64,mimetype:'image/jpeg',sizeBytes:spCompressed.sizeBytes,description:stepForName?('Polarsteps: '+stepForName.name):'Polarsteps photo',placeId:placeIdForStep}
           });
           if(sppr&&sppr.ok){spCount++;if(sppr.fileId)importRefs.push({type:'file',id:sppr.fileId});}else spFailed++;
           document.getElementById('sub-'+kp+'steppics').textContent=spCount+' / '+totalStepPhotos+' done';
@@ -2189,6 +2260,41 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     if(spSkipped)result.log.push({type:'steppics',message:spSkipped+' Polarsteps photo(s) skipped — their step had no place (no coordinates, or Places import was off)'});
   }
 
+  // Fallback: fetch a step's own Polarsteps-hosted photo (main_media_item_path) when no local
+  // ZIP photo was found for that step at all — lets a bare trip.json import (no full ZIP
+  // export, so target.stepPhotosByStepId is empty) still bring in at least one photo per step.
+  // Only for steps that got nothing from the ZIP above, to avoid a redundant duplicate
+  // attachment when a full export IS present. The iframe's CSP connect-src is built from this
+  // plugin's own granted egress hosts, and polarsteps.s3.amazonaws.com is one of them, so this
+  // fetch() is allowed the same way /upload-photo's own calls are.
+  if(options.importPhotos&&result.tripId&&target.polarsteps&&target.polarsteps.steps){
+    var stepsNeedingMediaFallback=target.polarsteps.steps.filter(function(s){
+      return s.mediaUrl&&!(target.stepPhotosByStepId[s.id]&&target.stepPhotosByStepId[s.id].length);
+    });
+    if(stepsNeedingMediaFallback.length){
+      var mfCount=0,mfFailed=0,mfSkipped=0;
+      var stepPlaceIds2=(progress&&progress.stepPlaceIds)||{};
+      for(var mstep of stepsNeedingMediaFallback){
+        var placeIdForMedia=stepPlaceIds2[mstep.id];
+        if(!placeIdForMedia){mfSkipped++;continue;}
+        try{
+          var mresp=await fetch(mstep.mediaUrl);
+          if(!mresp.ok){mfFailed++;continue;}
+          var mbuf=await mresp.arrayBuffer();
+          var mCompressed=await compressUnderCap(mbuf,mstep.name+'.jpg',PHOTO_UPLOAD_MAX_BASE64);
+          if(!mCompressed){mfFailed++;continue;}
+          var mpr=await invoke('/upload-photo','POST',{
+            tripId:result.tripId,
+            photo:{name:mstep.name+'.jpg',base64:mCompressed.base64,mimetype:'image/jpeg',sizeBytes:mCompressed.sizeBytes,description:'Polarsteps: '+mstep.name,placeId:placeIdForMedia}
+          });
+          if(mpr&&mpr.ok){mfCount++;if(mpr.fileId)importRefs.push({type:'file',id:mpr.fileId});}else mfFailed++;
+          await new Promise(function(r){setTimeout(r,400);});
+        }catch(_e){mfFailed++;}
+      }
+      if(mfCount)result.log.push({type:'steppics',message:'Fetched '+mfCount+' step photo'+(mfCount===1?'':'s')+' directly from Polarsteps (no local export photo found for '+(mfCount===1?'it':'them')+')'});
+    }
+  }
+
   return {ok:true,tripId:result.tripId,refs:importRefs,log:result.log||[],errors:allErrors};
 }
 
@@ -2200,7 +2306,9 @@ async function importOneTarget(target,options,progList,isPdfTarget){
 // trip the batch touched (window._lastImportBatches), one at a time — /undo-import takes a
 // single tripId, so a multi-journey import needs one pass per trip it created.
 async function doUndoImport(){
-  var batches=(window._lastImportBatches||[]).filter(function(b){return b.tripId&&b.refs&&b.refs.length;});
+  // tripId can legitimately be null for a journal-only import (no trip was ever created) —
+  // /undo-import accepts a missing tripId for refs that don't need one (journey/journalEntry).
+  var batches=(window._lastImportBatches||[]).filter(function(b){return b.refs&&b.refs.length;});
   if(!batches.length)return;
   var totalItems=batches.reduce(function(n,b){return n+b.refs.length;},0);
   var ok=await trekConfirm(
@@ -2408,23 +2516,43 @@ function renderKmlPreview(body){
   body.appendChild(list);
 }
 
-// Compress image buffer to base64 JPEG via Canvas
-async function compressToBase64(buffer,filename){
+// Compress image buffer to base64 JPEG via Canvas, at a given max dimension/quality.
+async function compressToBase64(buffer,filename,maxDim,quality){
+  maxDim=maxDim||1200;quality=quality==null?0.75:quality;
   return new Promise(function(resolve,reject){
     var blob=new Blob([buffer]);
     var url=URL.createObjectURL(blob);
     var img=new Image();
     img.onload=function(){
       URL.revokeObjectURL(url);
-      var MAX=1200;var w=img.width,h=img.height;
-      if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}
-      if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
+      var w=img.width,h=img.height;
+      if(w>maxDim){h=Math.round(h*maxDim/w);w=maxDim;}
+      if(h>maxDim){w=Math.round(w*maxDim/h);h=maxDim;}
       var canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
       var ctx2=canvas.getContext('2d');ctx2.drawImage(img,0,0,w,h);
-      resolve(canvas.toDataURL('image/jpeg',0.75).split(',')[1]);
+      resolve(canvas.toDataURL('image/jpeg',quality).split(',')[1]);
     };
     img.onerror=reject;img.src=url;
   });
+}
+
+// Compress a photo down through progressively smaller passes until its base64 payload fits
+// under capBytes, instead of compressing once at a fixed size and just discarding the photo
+// if that single attempt came out too big. Needed because the plugin-route proxy's real
+// request-body ceiling is undocumented and confirmed (against a real TREK instance) to 413
+// even under the previous single-pass 900KB target — so a fixed compression level was never
+// going to reliably land under an unknown, apparently-lower limit. Returns
+// {base64,sizeBytes} from the first pass that fits, or null if even the smallest pass doesn't.
+async function compressUnderCap(buffer,filename,capBytes){
+  var passes=[[1200,0.75],[900,0.6],[700,0.5],[500,0.4],[350,0.35]];
+  var result=null
+  for(var i=0;i<passes.length;i++){
+    var b64=await compressToBase64(buffer,filename,passes[i][0],passes[i][1]);
+    var sizeB=Math.round(b64.length*0.75);
+    result={base64:b64,sizeBytes:sizeB};
+    if(sizeB<=capBytes)return result;
+  }
+  return result.sizeBytes<=capBytes?result:null;
 }
 
 async function doAIAssist(){
