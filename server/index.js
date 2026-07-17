@@ -47,6 +47,50 @@ function unixToDateInTz(ts, tz) {
   } catch (_e) { return unixToDate(ts) }
 }
 
+// Maps raw Polarsteps step objects (trip.all_steps entries) to the shape /import consumes.
+// Extracted out of /parse-polarsteps's handler so the SAME mapping runs whether steps arrive as
+// part of a full trip.json (small trips, single request) or as one `stepsChunk` of a large trip
+// split across several requests to stay under the plugin-route proxy's body-size ceiling.
+// startIndex offsets the "Stop N" fallback name (used only when a step has neither name nor
+// display_name) so numbering stays globally correct across chunked calls instead of restarting
+// at "Stop 1" for every chunk.
+function mapPolarstepsSteps(steps, startIndex) {
+  startIndex = startIndex || 0
+  return steps.map((s, i) => {
+    i += startIndex
+    const tz = s.timezone_id || null
+    const date = unixToDateInTz(s.start_time || s.creation_time, tz)
+    // A step can span multiple calendar days (e.g. a week-long stay) — end_time was
+    // previously never read at all, so every day after the start date showed nothing
+    // on the itinerary for that stay. Only set when it's a genuinely later day, so a
+    // same-day end_time doesn't trigger the multi-day assignment path in /import for no reason.
+    const endDate = unixToDateInTz(s.end_time, tz)
+    return {
+      // Polarsteps' own step id — trip.json itself carries no LOCAL photo path (photos
+      // live in a sibling ZIP folder named "<slug>_<id>/photos/*", confirmed against the
+      // community polarsteps-data-parser project's folder-matching logic) — but it CAN
+      // carry a direct CDN url for the step's own designated cover photo
+      // (main_media_item_path, mediaUrl below), which /import uses as a fallback when no
+      // local ZIP photo was found for this step (e.g. a bare trip.json with no full ZIP
+      // export). The client uses this id to find the ZIP's sibling photo folder and
+      // upload its photos once /import has created this step's place — see
+      // doAnalyze()/doImport() in client/index.html.
+      id: s.id != null ? String(s.id) : (s.uuid != null ? String(s.uuid) : null),
+      name: (s.name && s.name.trim()) || s.display_name || ('Stop ' + (i + 1)),
+      description: (s.description && s.description.trim()) || null,
+      date,
+      endDate: endDate && endDate > date ? endDate : null,
+      weather: s.weather_condition ? { condition: s.weather_condition, tempC: s.weather_temperature ?? null } : null,
+      mediaUrl: s.main_media_item_path || null,
+      location: s.location ? {
+        name: s.location.full_detail || s.location.name || null,
+        lat: typeof s.location.lat === 'number' ? s.location.lat : null,
+        lon: typeof s.location.lon === 'number' ? s.location.lon : null,
+      } : null,
+    }
+  })
+}
+
 // Normalize a loose date string (various separators/field orders, as found in expense CSVs)
 // to YYYY-MM-DD, or null if it can't be parsed. Mirrors the disambiguation already used for
 // booking-text date extraction below: a 4-digit first field is YYYY-MM-DD; a 4-digit last
@@ -183,7 +227,10 @@ function parseGoogleTimeline(json) {
     const step = Math.max(1, Math.floor(locs.length / 200))
     for (let i = 0; i < locs.length; i += step) {
       const l = locs[i]
-      if (l.latitudeE7 && l.longitudeE7) {
+      // Truthy checks silently drop a real point exactly on the equator or prime meridian
+      // (latitudeE7/longitudeE7 === 0, a legitimate coordinate, is falsy) — check the fields
+      // are actually present instead of checking they're non-zero.
+      if (typeof l.latitudeE7 === 'number' && typeof l.longitudeE7 === 'number') {
         const date = l.timestamp ? l.timestamp.slice(0, 10) : null
         places.push({ lat: l.latitudeE7 / 1e7, lng: l.longitudeE7 / 1e7, date, name: null, photoCount: 1 })
       }
@@ -195,12 +242,18 @@ function parseGoogleTimeline(json) {
 
 
 // ── Regex-based booking extractor ────────────────────────────────────────────
-// Parse a localized number string ("1 978,00", "1,234.56", "1.234,56", "978.00")
-// into a plain float — the last comma/dot followed by exactly 2 digits is the
-// decimal separator; everything else (spaces, other commas/dots) is a thousands separator.
+// Parse a localized number string ("1 978,00", "1,234.56", "1.234,56", "978.00", "20.5")
+// into a plain float — the last comma/dot followed by exactly 1 OR 2 trailing digits is the
+// decimal separator; everything else (spaces, other commas/dots, or a 3+-digit trailing group)
+// is a thousands separator. Originally required exactly 2 trailing digits, which silently
+// mis-parsed any single-decimal-digit amount ("20.5" EUR, "20,5" DKK — both real, common
+// formats) as a thousands-grouped integer instead: falling through to the plain digit-strip
+// path turned "20.5" into 205, a silent 10x inflation with no error surfaced. A 3+-digit
+// trailing group is still treated as thousands ("1.234" -> 1234), since real currency amounts
+// essentially never carry 3 decimal places.
 function parseLocalizedNumber(str) {
   const s = String(str).replace(/\s/g, '')
-  const m = s.match(/^(.*)[.,](\d{2})$/)
+  const m = s.match(/^(.*)[.,](\d{1,2})$/)
   if (m) return parseFloat(m[1].replace(/[.,]/g, '') + '.' + m[2])
   return parseFloat(s.replace(/[.,]/g, ''))
 }
@@ -458,7 +511,11 @@ function detectAirline(flightNum) {
     OS:'Austrian Airlines',LX:'Swiss',EK:'Emirates',QR:'Qatar',
     CX:'Cathay Pacific',NH:'ANA',JL:'JAL',SQ:'Singapore Airlines',
   }
-  const prefix = flightNum.replace(/\d/g,'').toUpperCase()
+  // The prefix is always exactly the first 2 characters (fn = flightRe's [A-Z]{2}|[A-Z]\d
+  // capture, concatenated directly with the digits that follow) — stripping ALL digits instead
+  // broke every mixed letter+digit code (W6 Wizz Air, U2 easyJet): "W61234" lost its "6" too,
+  // leaving prefix "W" (not in the map) instead of "W6", so the operator silently came back null.
+  const prefix = flightNum.slice(0, 2).toUpperCase()
   return codes[prefix] || null
 }
 
@@ -573,7 +630,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.13.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.17.0 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -593,6 +650,22 @@ module.exports = definePlugin({
     {
       method: 'POST', path: '/parse-polarsteps', auth: true,
       async handler(req, ctx) {
+        // A trip.json with many steps is exactly the shape most likely to trip the plugin-route
+        // proxy's own undocumented body-size ceiling — confirmed against a REAL instance at just
+        // ~0.27MB (300 steps), far below where local dev-server testing could ever catch it (the
+        // dev server doesn't enforce whatever the production proxy does). Below this ceiling
+        // basically no real trip.json is safe to send in one request, so the client now chunks
+        // `all_steps` client-side (see doAnalyze()/parsePolarstepsChunked() in client/index.html)
+        // and calls this route once per chunk via `stepsChunk`, merging the results itself — the
+        // original single-shot `{json}` shape stays exactly as it was for backward compatibility
+        // (and is still what the client uses for the trip-metadata-only call, all_steps stripped).
+        const stepsChunk = req.body?.stepsChunk
+        if (Array.isArray(stepsChunk)) {
+          const startIndex = Number(req.body?.stepsChunkOffset) || 0
+          const result = await tryAttempt(async () => ({ steps: mapPolarstepsSteps(stepsChunk, startIndex) }))
+          return safeJson(200, result)
+        }
+
         const raw = req.body?.json
         if (!raw) return safeJson(200, { error: 'json required' })
         const result = await tryAttempt(async () => {
@@ -612,38 +685,7 @@ module.exports = definePlugin({
             summary: (trip.summary && trip.summary.trim()) || null,
             coverPhotoUrl: trip.cover_photo_path || trip.cover_photo?.large_thumbnail_path || trip.cover_photo?.path || null,
             stepCount: steps.length,
-            steps: steps.map((s, i) => {
-              const tz = s.timezone_id || null
-              const date = unixToDateInTz(s.start_time || s.creation_time, tz)
-              // A step can span multiple calendar days (e.g. a week-long stay) — end_time was
-              // previously never read at all, so every day after the start date showed nothing
-              // on the itinerary for that stay. Only set when it's a genuinely later day, so a
-              // same-day end_time doesn't trigger the multi-day assignment path in /import for no reason.
-              const endDate = unixToDateInTz(s.end_time, tz)
-              return {
-                // Polarsteps' own step id — trip.json itself carries no LOCAL photo path (photos
-                // live in a sibling ZIP folder named "<slug>_<id>/photos/*", confirmed against the
-                // community polarsteps-data-parser project's folder-matching logic) — but it CAN
-                // carry a direct CDN url for the step's own designated cover photo
-                // (main_media_item_path, mediaUrl below), which /import uses as a fallback when no
-                // local ZIP photo was found for this step (e.g. a bare trip.json with no full ZIP
-                // export). The client uses this id to find the ZIP's sibling photo folder and
-                // upload its photos once /import has created this step's place — see
-                // doAnalyze()/doImport() in client/index.html.
-                id: s.id != null ? String(s.id) : (s.uuid != null ? String(s.uuid) : null),
-                name: (s.name && s.name.trim()) || s.display_name || ('Stop ' + (i + 1)),
-                description: (s.description && s.description.trim()) || null,
-                date,
-                endDate: endDate && endDate > date ? endDate : null,
-                weather: s.weather_condition ? { condition: s.weather_condition, tempC: s.weather_temperature ?? null } : null,
-                mediaUrl: s.main_media_item_path || null,
-                location: s.location ? {
-                  name: s.location.full_detail || s.location.name || null,
-                  lat: typeof s.location.lat === 'number' ? s.location.lat : null,
-                  lon: typeof s.location.lon === 'number' ? s.location.lon : null,
-                } : null,
-              }
-            }),
+            steps: mapPolarstepsSteps(steps),
           }
         })
         return safeJson(200, result)
@@ -685,7 +727,10 @@ module.exports = definePlugin({
         const result = await tryAttempt(async () => {
           const byDate = {}
           for (const p of photos) {
-            if (!p.lat || !p.lng) continue
+            // Truthy checks silently drop a real photo taken exactly on the equator or prime
+            // meridian (lat/lng === 0 is a legitimate coordinate, but falsy) — check the fields
+            // are actually numbers instead of checking they're non-zero.
+            if (typeof p.lat !== 'number' || typeof p.lng !== 'number') continue
             const date = (p.date || '').slice(0, 10) || 'unknown'
             if (!byDate[date]) byDate[date] = []
             byDate[date].push(p)
@@ -918,7 +963,7 @@ module.exports = definePlugin({
                 }
               } catch (e) { errors.push('Journal: ' + e.message) }
             }
-            if (journeyId && p.journal < steps.length) {
+            if (journeyId && p.journal < totalSteps) {
               let i = p.journal
               for (; i < steps.length; i++) {
                 if (!withinBudget()) break
@@ -939,10 +984,10 @@ module.exports = definePlugin({
               }
               p.journal = i
             } else if (!journeyId) {
-              p.journal = steps.length // couldn't create/find a journey — don't retry forever
+              p.journal = totalSteps // couldn't create/find a journey — don't retry forever
             }
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
-            if (p.journal < steps.length) msg += ' (' + (steps.length - p.journal) + ' more queued)'
+            if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
             p.done = p.journal >= steps.length
             return { ok: true, tripId: null, log, errors, progress: p }
@@ -962,7 +1007,15 @@ module.exports = definePlugin({
             // can't re-trigger mid-import once a trip exists.
             if (polarsteps?.uuid && !progressIn && !tripConfig.forceDuplicate) {
               const mine = await attempt(() => ctx.trips.listMine(), [])
+              // Unlike every other section in this route, this loop runs entirely BEFORE trip
+              // creation and has no resumable fallback if it stalls — the RPC dispatch boundary's
+              // own rate limit (20/s) alone means 200 sequential ctx.meta.get calls take >=10s,
+              // already past the whole round's ~6-8s budget with zero added latency. Bail out and
+              // just create the trip normally rather than risk timing out the entire import over
+              // a duplicate check — a user with enough trips to hit this misses the dedup
+              // check sometimes, which is a far smaller cost than the import never completing.
               for (const t of (mine || []).slice(0, 200)) {
+                if (!withinBudget()) break
                 const existingUuid = await attempt(() => ctx.meta.get('trip', t.id, 'polarsteps_uuid'))
                 if (existingUuid && existingUuid === polarsteps.uuid) {
                   return { ok: true, duplicateOf: { tripId: t.id, title: t.title || null }, log, errors, progress: p }
@@ -989,7 +1042,15 @@ module.exports = definePlugin({
             // or the fetch fails.
             if (polarsteps?.coverPhotoUrl) {
               try {
-                const resp = await fetch(polarsteps.coverPhotoUrl)
+                // No timeout here would risk the same problem reverseGeocode() already guards
+                // against: a slow response could eat this whole round's ~6-8s budget before
+                // anything else (day rows, journal, places) even gets a chance to run.
+                const coverController = new AbortController()
+                const coverTimeout = setTimeout(() => coverController.abort(), 3000)
+                let resp
+                try {
+                  resp = await fetch(polarsteps.coverPhotoUrl, { signal: coverController.signal })
+                } finally { clearTimeout(coverTimeout) }
                 if (resp.ok) {
                   const buf = Buffer.from(await resp.arrayBuffer())
                   const contentType = resp.headers.get('content-type') || 'image/jpeg'
@@ -1095,7 +1156,7 @@ module.exports = definePlugin({
 
           // ── 2. Polarsteps → Journal + Places + Day Notes ───────────────────
           const journalActive = !!(polarsteps && options?.importJournal)
-          if (journalActive && p.journal < steps.length) {
+          if (journalActive && p.journal < totalSteps) {
             try {
               // Journey is created ONCE (first call, journeyId not yet known) and reused on every
               // resume call — otherwise each resumed call would start a brand new empty journey.
@@ -1130,9 +1191,9 @@ module.exports = definePlugin({
               }
               if (journeyId) {
                 let i = p.journal
-                for (; i < steps.length; i++) {
+                for (; i < stepOffset + steps.length; i++) {
                   if (!withinBudget()) break
-                  const step = steps[i]
+                  const step = steps[i - stepOffset]
                   try {
                     // Reverse geocode if no name
                     let placeName = step.location?.name || step.name
@@ -1225,14 +1286,14 @@ module.exports = definePlugin({
                 }
                 p.journal = i
               } else {
-                p.journal = steps.length // couldn't create/find a journey — don't retry forever
+                p.journal = totalSteps // couldn't create/find a journey — don't retry forever
               }
             } catch (e) { errors.push('Journal: ' + e.message) }
           }
           if (journalActive) {
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journalDayNotes) msg += ', ' + p.journalDayNotes + ' day notes'
-            if (p.journal < steps.length) msg += ' (' + (steps.length - p.journal) + ' more queued)'
+            if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
           }
 
@@ -1401,7 +1462,7 @@ module.exports = definePlugin({
           }
 
           p.done = p.days >= dateRange.length &&
-            (!journalActive || p.journal >= steps.length) &&
+            (!journalActive || p.journal >= totalSteps) &&
             (!options?.importPlaces || p.places >= clusters.length) &&
             (!bookingsActive || p.bookings >= bookings.length) &&
             (!costsActive || p.costs >= expenses.length)

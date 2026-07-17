@@ -967,6 +967,11 @@ function trekConfirm(message,opts){
     window.parent.postMessage({type:'trek:confirm',requestId:id,title:opts.title,message:message,confirmLabel:opts.confirmLabel,cancelLabel:opts.cancelLabel,danger:opts.danger!==false},'*');
   });
 }
+// Same sandbox limitation as trekConfirm above, for a plain notice rather than a yes/no —
+// bare alert() would be a silent no-op in the real host. Fire-and-forget toast, no response.
+function notifyUser(message,level){
+  window.parent.postMessage({type:'trek:notify',level:level||'error',message:message},'*');
+}
 window.addEventListener('message',function(e){
   if(e.source!==window.parent)return;var m=e.data;if(!m||typeof m!=='object')return;
   if(m.type==='trek:context')onCtx(m);
@@ -1007,6 +1012,75 @@ function updateDropHint(){
   var hint=document.querySelector('.drop-hint');
   hint.textContent=files.length+' file'+(files.length===1?' added':' added')+': '+files.map(function(f){return f.name;}).join(', ').slice(0,80);
   rh();
+}
+
+// Sends a Polarsteps trip.json to /parse-polarsteps — chunked for a large trip instead of one
+// oversized request. Confirmed against a REAL TREK instance: even a 0.27MB (300-step) trip.json
+// 413s in a single call — the plugin-route proxy's real body-size ceiling is far below anything
+// a normal trip.json can be relied on staying under, and far below what local `trek-plugin dev`
+// testing can ever catch (the dev server doesn't enforce whatever the production proxy does).
+// A small trip still goes through in one call, unchanged. Returns the same shape
+// /parse-polarsteps always returned, or null (pushing a message onto jsonWarnings) on failure.
+async function parsePolarstepsSmart(text,filename,jsonWarnings){
+  var SINGLE_SHOT_MAX=150000; // conservative margin under the ~270KB confirmed failure point —
+  // the exact real ceiling isn't known, only that 270KB fails and this needs to stay well clear.
+  var CHUNK_TARGET_BYTES=60000;
+  if(text.length<=SINGLE_SHOT_MAX){
+    try{
+      var data=await invoke('/parse-polarsteps','POST',{json:text});
+      if(data&&!data.error&&data.name)return data;
+      if(data&&data.error)jsonWarnings.push(filename+' ('+(text.length/1e6).toFixed(2)+'MB): '+data.error);
+      return null;
+    }catch(pe){
+      jsonWarnings.push(filename+' ('+(text.length/1e6).toFixed(2)+'MB) failed to parse — '+pe.message);
+      return null;
+    }
+  }
+
+  // Large trip: parse locally (cheap — browsers handle multi-MB JSON.parse fine, this is just
+  // string/object work, no network) and split all_steps across several small requests.
+  var tripParsed;
+  try{tripParsed=JSON.parse(text);}catch(pe){
+    jsonWarnings.push(filename+' ('+(text.length/1e6).toFixed(2)+'MB): could not parse as JSON — '+pe.message);
+    return null;
+  }
+  var tripRaw=Array.isArray(tripParsed)?tripParsed[0]:tripParsed;
+  var allSteps=Array.isArray(tripRaw.all_steps)?tripRaw.all_steps:[];
+
+  // Metadata call: all_steps stripped, so this stays tiny regardless of how large the trip is.
+  var metaResult;
+  try{
+    metaResult=await invoke('/parse-polarsteps','POST',{json:JSON.stringify(Object.assign({},tripRaw,{all_steps:[]}))});
+  }catch(pe){
+    jsonWarnings.push(filename+': trip metadata request failed — '+pe.message);
+    return null;
+  }
+  if(!metaResult||metaResult.error){
+    jsonWarnings.push(filename+': '+((metaResult&&metaResult.error)||'trip metadata request failed'));
+    return null;
+  }
+
+  var mergedSteps=[],chunk=[],chunkBytes=2,chunkStart=0,chunkFailed=0;
+  async function flushChunk(){
+    if(!chunk.length)return;
+    try{
+      var chunkResult=await invoke('/parse-polarsteps','POST',{stepsChunk:chunk,stepsChunkOffset:chunkStart});
+      if(chunkResult&&chunkResult.steps)mergedSteps=mergedSteps.concat(chunkResult.steps);
+      else chunkFailed+=chunk.length;
+    }catch(_e){chunkFailed+=chunk.length;}
+    chunkStart+=chunk.length;chunk=[];chunkBytes=2;
+  }
+  for(var si=0;si<allSteps.length;si++){
+    var sBytes=JSON.stringify(allSteps[si]).length;
+    if(chunk.length&&chunkBytes+sBytes>CHUNK_TARGET_BYTES)await flushChunk();
+    chunk.push(allSteps[si]);chunkBytes+=sBytes+1;
+  }
+  await flushChunk();
+  if(chunkFailed)jsonWarnings.push(filename+': '+chunkFailed+' of '+allSteps.length+' steps failed to import (a chunk request failed)');
+
+  metaResult.steps=mergedSteps;
+  metaResult.stepCount=mergedSteps.length;
+  return metaResult;
 }
 
 // ── Analyze files ──────────────────────────────────────────────────────────
@@ -1067,21 +1141,21 @@ async function doAnalyze(){
         var txt=await tje.entry.async('text');
         jsonFiles.push({_text:txt,name:tje.path});
       }
-      // Collect generic (non-step) photos
+      // Collect generic (non-step) photos — bytes are NOT read here (see getFileBuffer()):
+      // a large export can have hundreds of multi-MB photos, and reading them all into
+      // ArrayBuffers up front is exactly what made this wizard fail on a 500MB+ trip. The
+      // entry itself stays decompressable for the rest of the session either way.
       for(var pe of photoEntries.slice(0,300)){
-        var ab=await pe.entry.async('arraybuffer');
-        imgFiles.push({_buffer:ab,name:pe.name,_fromZip:true});
+        imgFiles.push({_zipEntry:pe.entry,name:pe.name,_fromZip:true});
       }
     }catch(e){console.error('ZIP error:',e);}
   }
-  // Read step photo bytes now (capped — a long trip can have hundreds); grouped by step id so
+  // Group step photo entries by step id (capped — a long trip can have hundreds) so
   // doImport() can look up "this step's photos" once it knows that step's created placeId.
+  // Bytes are read lazily via getFileBuffer(), same reasoning as the generic photos above.
   var stepPhotosByStepId={};
   for(var spe of stepPhotoEntries.slice(0,500)){
-    try{
-      var spab=await spe.entry.async('arraybuffer');
-      (stepPhotosByStepId[spe.stepId]=stepPhotosByStepId[spe.stepId]||[]).push({_buffer:spab,name:spe.name});
-    }catch(_e){}
+    (stepPhotosByStepId[spe.stepId]=stepPhotosByStepId[spe.stepId]||[]).push({_zipEntry:spe.entry,name:spe.name});
   }
   parsed._stepPhotosByStepId=stepPhotosByStepId; // read by doImport() after places are created
 
@@ -1089,6 +1163,12 @@ async function doAnalyze(){
   //    Photos Takeout per-photo sidecars ("IMG_1234.jpg.json": photoTakenTime+geoData)
   var polarstepsList=[];
   var takeoutPoints=[],takeoutCoveredNames={};
+  var jsonWarnings=[]; // surfaced as a toast below — a trip.json this route can't parse used to
+  // just vanish from the picker with nothing but a console.warn; a multi-MB trip.json (a long
+  // trip with hundreds of steps) is exactly the shape most likely to hit the plugin-route
+  // proxy's own undocumented body-size ceiling (already confirmed, for uploads, well under
+  // 10MB) — that failure needs to be visible, not silent, especially since it'd selectively
+  // drop only the LARGEST trip out of a multi-trip export while the others import fine.
   for(var jf of jsonFiles){
     try{
       var text;
@@ -1120,14 +1200,15 @@ async function doAnalyze(){
           }
         }catch(_e){}
       } else {
-        // Try as Polarsteps trip.json
-        var data=await invoke('/parse-polarsteps','POST',{json:text});
-        if(data&&!data.error&&data.name){
-          polarstepsList.push(data);
-        }
+        // Try as Polarsteps trip.json — see parsePolarstepsSmart() for why this isn't just one
+        // invoke() call for a large trip.
+        if(text.length>150000)showSt1('Parsing '+jf.name+' ('+(text.length/1e6).toFixed(1)+'MB, this may take a moment)…','');
+        var data=await parsePolarstepsSmart(text,jf.name,jsonWarnings);
+        if(data)polarstepsList.push(data);
       }
     }catch(e){console.warn('JSON parse error:',e);}
   }
+  if(jsonWarnings.length)notifyUser(jsonWarnings.length+' trip file'+(jsonWarnings.length===1?'':'s')+" couldn't be read: "+jsonWarnings.join('; ').slice(0,180),'warning');
   // Multiple Polarsteps journeys select ALL of them by default — the user deselects any they
   // don't want in the step 2 preview (renderPolarstepsPreview). Each selected journey becomes
   // its own trip at import time (computeTripTargets()), auto-scoped to its own dates — see
@@ -1149,7 +1230,7 @@ async function doAnalyze(){
     var gpsNone=0;
     for(var img of imgFilesToScan){
       try{
-        var buf=img._buffer||await readBuffer(img);
+        var buf=await getFileBuffer(img);
         var gps=await extractGPS(buf,img.name);
         if(gps)gpsData.push(gps);else gpsNone++;
       }catch(_e){gpsNone++;}
@@ -1290,13 +1371,13 @@ function renderPreview(){
     parsed.expenses.length>0, renderExpensesPreview);
   renderSourceCard(grid,'timeline','si-bookings','🗺️','Google Maps Timeline',
     parsed.timelinePlaces.length?parsed.timelinePlaces.length+' location clusters found':'No timeline data found',
-    parsed.timelinePlaces.length>0, renderTimelinePreview);
+    parsed.timelinePlaces.length>0, function(body){renderPlacesPreview(body,parsed.timelinePlaces);});
   renderSourceCard(grid,'gpx','si-bookings','🥾','GPX Track',
     parsed.gpxPlaces.length?parsed.gpxPlaces.length+' location clusters found':'No GPX file found',
-    parsed.gpxPlaces.length>0, renderGpxPreview);
+    parsed.gpxPlaces.length>0, function(body){renderPlacesPreview(body,parsed.gpxPlaces);});
   renderSourceCard(grid,'kml','si-bookings','📌','KML/KMZ Places',
     parsed.kmlPlaces.length?parsed.kmlPlaces.length+' location clusters found':'No KML/KMZ file found',
-    parsed.kmlPlaces.length>0, renderKmlPreview);
+    parsed.kmlPlaces.length>0, function(body){renderPlacesPreview(body,parsed.kmlPlaces);});
 
   var hasAny=parsed.polarstepsAll.length||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length||parsed.gpxPlaces.length||parsed.kmlPlaces.length;
   document.getElementById('step2-next').disabled=!hasAny;
@@ -1446,12 +1527,24 @@ function renderExpensesPreview(body){
 // objects, so an in-progress title edit or mode toggle is never silently reset mid-session.
 var journeyTargets=[], extraTargets=[], unassigned=null, extraTargetSeq=0;
 
+// Reuses an EXISTING target object for any journey that's still selected, only creating a
+// fresh one for a newly-checked journey — calling this again is how the user reaches step 3 a
+// second time (the "Back" button on step 3 goes to step 2, and step 2's "Continue" button
+// re-enters step 3, both fully reachable without ever finishing an import). Rebuilding every
+// journey target from scratch on every entry used to silently discard any title/mode edit, any
+// picked existing-trip id, the instant the user went back to tweak an unrelated checkbox — the
+// same staleness bug already found and fixed once for the label field, just structural instead
+// of cosmetic this time.
 function buildJourneyTargets(){
   var selectedIdx=(parsed._selectedJourneyIdx||[]).slice().sort(function(a,b){return a-b;});
+  var existingByKey={};
+  journeyTargets.forEach(function(t){existingByKey[t.key]=t;});
   return selectedIdx.map(function(idx){
+    var key='j'+idx;
+    if(existingByKey[key])return existingByKey[key];
     var j=parsed.polarstepsAll[idx];
     return {
-      key:'j'+idx, kind:'journey', journeyIdx:idx, label:j.name,
+      key:key, kind:'journey', journeyIdx:idx, label:j.name,
       mode:'new', title:j.name, startDate:j.startDate||null, endDate:j.endDate||null,
       existingTripId:'', polarsteps:j,
       bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
@@ -1585,8 +1678,11 @@ function unassignedHasContent(){
 
 // ── Configure ──────────────────────────────────────────────────────────────
 async function prepareStep3(){
+  // buildJourneyTargets() reuses any still-selected journey's existing target object (preserving
+  // title/mode/existingTripId edits); extraTargets is deliberately NOT reset here — both matter
+  // because goStep(3) runs this on EVERY entry, including the fully-reachable Back(to step 2)
+  // → Continue round trip, not just the first time. Only resetAll() clears extraTargets.
   journeyTargets=buildJourneyTargets();
-  extraTargets=[];
   rebuildTripTargets();
 
   // Shared by the classic single #trip-select AND every per-target "existing trip" select
@@ -1701,12 +1797,12 @@ function renderTripTargets(){
 
     var head=document.createElement('div');head.style.cssText='display:flex;justify-content:space-between;align-items:flex-start;gap:8px;';
     var headText=document.createElement('div');
-    headText.innerHTML='<div style="font-size:13px;font-weight:600;color:var(--text-primary);">'+escHtml(t.label)+'</div>'+
+    headText.innerHTML='<div class="target-label-text" style="font-size:13px;font-weight:600;color:var(--text-primary);">'+escHtml(t.label)+'</div>'+
       '<div style="font-size:11px;color:var(--text-faint);margin-bottom:8px;">'+
       (t.kind==='journey'&&t.startDate?t.startDate+' → '+t.endDate+' · ':'')+
       (counts.length?escHtml(counts.join(' · ')):'No data assigned yet')+'</div>';
     head.appendChild(headText);
-    if(t.kind==='extra'&&extraTargets.length>1){
+    if(t.kind==='extra'){
       var rmBtn=document.createElement('button');rmBtn.type='button';rmBtn.title='Remove this trip';
       rmBtn.style.cssText='border:none;background:none;color:var(--text-faint);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;';
       rmBtn.textContent='×';
@@ -1727,7 +1823,17 @@ function renderTripTargets(){
       var titleWrap=document.createElement('div');titleWrap.className='field-wrap';
       var titleLabel=document.createElement('label');titleLabel.textContent='Trip name';
       var titleInput=document.createElement('input');titleInput.className='field-input';titleInput.value=t.title||'';
-      titleInput.addEventListener('input',function(){t.title=titleInput.value;});
+      // t.label is what every OTHER reference to this trip shows — this card's own header, the
+      // "assigned to" chips, and the bulk-assign toolbar buttons in the unassigned panel below.
+      // It must track the name as it's typed, not just t.title (which only this input reads) —
+      // but a full renderTripTargets() on every keystroke would tear out this very input and
+      // drop focus/cursor position, so refreshTargetLabel() patches just the other read sites
+      // directly instead of re-rendering the whole target-cards tree.
+      titleInput.addEventListener('input',function(){
+        t.title=titleInput.value;
+        t.label=t.title||'Trip';
+        refreshTargetLabel(t,card);
+      });
       titleWrap.appendChild(titleLabel);titleWrap.appendChild(titleInput);
       card.appendChild(titleWrap);
       if(t.kind==='extra'){
@@ -1755,7 +1861,15 @@ function renderTripTargets(){
         if(String(t.existingTripId)===String(et.id))o.selected=true;
         existSel.appendChild(o);
       });
-      existSel.addEventListener('change',function(){t.existingTripId=existSel.value;});
+      existSel.addEventListener('change',function(){
+        t.existingTripId=existSel.value;
+        // Same "everything else shows t.label" reasoning as the title input — once a real
+        // trip is picked, show ITS name instead of the ad-hoc "Additional trip N" placeholder.
+        // A <select> 'change' isn't a per-keystroke event, so a full re-render is safe here.
+        var picked=existingTrips.find(function(et){return String(et.id)===existSel.value;});
+        t.label=picked?picked.title:(t.title||'Trip');
+        renderTripTargets();
+      });
       existWrap.appendChild(existLabel);existWrap.appendChild(existSel);
       card.appendChild(existWrap);
     }
@@ -1772,13 +1886,29 @@ function renderTripTargets(){
   rh();
 }
 
+// Patches every place `t.label` is displayed OTHER than the input the user is actively typing
+// into: this card's own header, and the unassigned panel's toolbar buttons/assignment chips
+// (rebuilt wholesale — safe, since it's a separate DOM subtree from `card` and holds no input
+// focus of its own). Deliberately does NOT call renderTripTargets() itself, which would destroy
+// and recreate `card`'s title input mid-keystroke.
+function refreshTargetLabel(t,card){
+  var labelEl=card.querySelector('.target-label-text');
+  if(labelEl)labelEl.textContent=t.label;
+  var listContainer=document.getElementById('trip-targets-list');
+  var oldPanel=listContainer.querySelector('.unassigned-panel');
+  if(oldPanel)oldPanel.remove();
+  renderUnassignedPanel(listContainer);
+  rh();
+}
+
 // The "needs a decision" panel: every item that fell outside every selected journey's dates,
 // grouped by kind, each with a bulk "add checked items to <trip>" toolbar (works for 1 item or
 // many) and a per-item × on its already-assigned chips (an item can carry more than one chip —
 // assigning it to 2 trips just means it gets imported into both).
 function renderUnassignedPanel(container){
   if(!unassignedHasContent())return;
-  var panel=document.createElement('div');panel.style.cssText='border:1px solid var(--warning);border-radius:10px;padding:12px;margin-bottom:10px;';
+  var panel=document.createElement('div');panel.className='unassigned-panel';
+  panel.style.cssText='border:1px solid var(--warning);border-radius:10px;padding:12px;margin-bottom:10px;';
   var warn=document.createElement('div');
   warn.style.cssText='font-size:12px;color:var(--warning);margin-bottom:10px;';
   warn.textContent='⚠️ The items below don\'t fall inside any selected journey\'s dates. Assign each to one or more trips (check items, then click a trip below them), or leave unchecked/unassigned to skip them.';
@@ -1987,13 +2117,22 @@ async function doImport(){
   // Every journey target always runs (the user explicitly checked it in step 2, even if it
   // turns out to have zero stops). An extra/ad-hoc trip only runs if something was actually
   // assigned to it — an unused "+ Add another trip" card is silently skipped, not imported empty.
-  var activeTargets=tripTargets.filter(function(t){return t.kind==='journey'||targetHasContent(t);});
-  if(!activeTargets.length){alert('Nothing to import — no trip has any data assigned.');return;}
+  // Journal-only mode creates a journey per Polarsteps journey and nothing else, so an 'extra'
+  // target (never has .polarsteps — it only exists to catch assigned bookings/expenses/photos,
+  // which journal-only mode doesn't touch at all) can never produce anything and is excluded
+  // outright, even if it happens to have items assigned to it.
+  var activeTargets=tripTargets.filter(function(t){
+    if(journalOnly)return t.kind==='journey';
+    return t.kind==='journey'||targetHasContent(t);
+  });
+  if(!activeTargets.length){notifyUser('Nothing to import — no trip has any data assigned.');return;}
   if(!journalOnly)for(var chk of activeTargets){
-    if(chk.mode==='existing'&&!chk.existingTripId){alert('Please select a trip for "'+chk.label+'".');return;}
+    if(chk.mode==='existing'&&!chk.existingTripId){notifyUser('Please select a trip for "'+chk.label+'".');return;}
   }
 
-  if(unassignedHasContent()){
+  // Unassigned bookings/expenses/photos are irrelevant in journal-only mode (none of them are
+  // ever imported there regardless), so don't ask about them.
+  if(!journalOnly&&unassignedHasContent()){
     var unCount=unassigned.bookings.length+unassigned.expenses.length+unassigned.gpsPlaces.length+
       unassigned.timelinePlaces.length+unassigned.imgFiles.length+Object.keys(unassigned.stepPhotosByStepId).length;
     var proceed=await trekConfirm(
@@ -2112,8 +2251,13 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // rarely finishes everything for a non-trivial trip. Loop, feeding each response's `progress`
   // back in as the next call's input and switching to {mode:'existing', tripId} after the
   // first call, until the server reports every section done.
+  // Strip the steps array out of the base payload to avoid 413 on large trips.
+  // Steps are sent as a rolling window each round based on where progress.journal is at.
+  var STEPS_PER_ROUND=40;
+  var allSteps=(target.polarsteps&&target.polarsteps.steps)||[];
+  var polarstepsMeta=target.polarsteps?Object.assign({},target.polarsteps,{steps:[]}):{};
   var importBody={
-    polarsteps:target.polarsteps,
+    polarsteps:target.polarsteps&&allSteps.length<=STEPS_PER_ROUND?target.polarsteps:polarstepsMeta,
     bookings:target.bookings,
     gpsPlaces:target.gpsPlaces,
     timelinePlaces:target.timelinePlaces,
@@ -2123,7 +2267,14 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   var progress=undefined,result=null,round=0,allErrors=[];
   do{
     round++;
-    result=await invoke('/import','POST',Object.assign({tripConfig:tripConfig,progress:progress},importBody));
+    // For large Polarsteps trips, inject just the steps needed this round
+    var callBody=Object.assign({tripConfig:tripConfig,progress:progress},importBody);
+    if(allSteps.length>STEPS_PER_ROUND&&target.polarsteps){
+      var stepOffset=progress?progress.journal||0:0;
+      var stepSlice=allSteps.slice(stepOffset,stepOffset+STEPS_PER_ROUND);
+      callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:stepSlice,_stepOffset:stepOffset,_totalSteps:allSteps.length});
+    }
+    result=await invoke('/import','POST',callBody);
 
     // A brand-new-trip import can detect it's re-importing a Polarsteps trip that was already
     // imported before (matched by the trip's own stable uuid, stored via ctx.meta the first
@@ -2132,14 +2283,29 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     // proceed anyway; if so, resend with forceDuplicate so the server skips the check next time.
     if(result.duplicateOf){
       var dupTitle=result.duplicateOf.title||('trip #'+result.duplicateOf.tripId);
-      var proceedAnyway=window.confirm('This Polarsteps trip looks like it was already imported as "'+dupTitle+'". Import it again as a separate new trip anyway?');
+      // window.confirm() doesn't work in the real sandboxed frame (no allow-popups/allow-modals
+      // on the iframe sandbox) — it would silently resolve falsy and permanently block
+      // re-importing any already-imported trip with no way to say yes. Use the host's native
+      // confirm dialog via the same bridge helper the Undo flow already uses.
+      var proceedAnyway=await trekConfirm(
+        'This Polarsteps trip looks like it was already imported as "'+dupTitle+'". Import it again as a separate new trip anyway?',
+        {title:'Duplicate trip detected',confirmLabel:'Import anyway',cancelLabel:'Skip',danger:false}
+      );
       if(!proceedAnyway)throw new Error('Skipped — already imported as "'+dupTitle+'"');
       tripConfig=Object.assign({},tripConfig,{forceDuplicate:true});
       progress={}; // keep the while-condition below safe (progress starts undefined) without marking done
       continue;
     }
 
-    tripConfig={mode:'existing',tripId:result.tripId};
+    // Keep sending this target's own dates on every round, not just the first — the server
+    // recomputes its day-range (and thus the `p.days` resume index) fresh from tripConfig/
+    // polarsteps on EVERY call, so if round 1 used a wider user-chosen range than the journey's
+    // own dates (extending it past Polarsteps' end date is a supported flow) and dropping
+    // startDate/endDate here made a later round fall back to the journey's narrower range, the
+    // day-index invariant the whole resumable design depends on would silently break: a shorter
+    // recomputed range can already look "done" at the old index, permanently skipping the
+    // remaining wide-range days without ever creating them.
+    tripConfig={mode:'existing',tripId:result.tripId,startDate:target.startDate||null,endDate:target.endDate||null};
     progress=result.progress||{done:true};
     // result.log messages are cumulative totals (server-side), safe to just redisplay each round.
     // result.errors are per-round (only errors from items processed THIS round), so accumulate them.
@@ -2204,7 +2370,7 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     progList.appendChild(photoProgItem);rh();
     for(var imgF of target.imgFiles){
       try{
-        var buf=imgF._buffer||await readBuffer(imgF);
+        var buf=await getFileBuffer(imgF);
         var compressed=await compressUnderCap(buf,imgF.name,PHOTO_UPLOAD_MAX_BASE64);
         if(!compressed){photoFailed++;continue;}
         var pr2=await invoke('/upload-photo','POST',{
@@ -2241,7 +2407,8 @@ async function importOneTarget(target,options,progList,isPdfTarget){
       for(var spf of target.stepPhotosByStepId[sid]){
         if(!placeIdForStep){spSkipped++;continue;} // step's place wasn't created (no coords, or import didn't reach it) — nothing to attach to
         try{
-          var spCompressed=await compressUnderCap(spf._buffer,spf.name,PHOTO_UPLOAD_MAX_BASE64);
+          var spBuf=await getFileBuffer(spf);
+          var spCompressed=await compressUnderCap(spBuf,spf.name,PHOTO_UPLOAD_MAX_BASE64);
           if(!spCompressed){spFailed++;continue;}
           var sppr=await invoke('/upload-photo','POST',{
             tripId:result.tripId,
@@ -2457,6 +2624,20 @@ function readText(file){
 function readBuffer(file){
   return new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result);};r.onerror=rej;r.readAsArrayBuffer(file);});
 }
+// Resolves a photo record's bytes on demand — zip-sourced photos carry a `_zipEntry`
+// (JSZip keeps an entry's own compressed bytes decompressable indefinitely, independent of the
+// original `zip`/File object going out of scope) instead of an eagerly-read `_buffer`, so a
+// large export's photos are only ever decompressed one at a time, right when actually needed
+// (EXIF read, then again at upload time), never all held in memory for the whole wizard session.
+// A trip with hundreds of multi-MB photos previously meant hundreds of full-size ArrayBuffers
+// alive simultaneously from step 1 through step 4 — confirmed as the cause of the wizard
+// hanging/failing on a 500MB+ Polarsteps trip. Decompressing twice (EXIF + upload) costs some
+// CPU but no meaningful memory, which is the right trade here.
+function getFileBuffer(file){
+  if(file._buffer)return Promise.resolve(file._buffer);
+  if(file._zipEntry)return file._zipEntry.async('arraybuffer');
+  return readBuffer(file);
+}
 
 // ── PDF text extraction (pdf.js) — booking confirmations are text-layer PDFs ──
 async function extractPDFText(buffer,filename){
@@ -2480,39 +2661,17 @@ async function extractPDFTextInner(buffer){
   return text;
 }
 
-function renderTimelinePreview(body){
+// Shared by the timeline/GPX/KML preview cards — the three were byte-for-byte identical
+// except for which parsed.*Places array they read.
+function renderPlacesPreview(body,places){
   var list=document.createElement('div');list.className='preview-list';
-  parsed.timelinePlaces.slice(0,8).forEach(function(p){
+  places.slice(0,8).forEach(function(p){
     var row=document.createElement('div');row.className='preview-item';
     row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
       '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
     list.appendChild(row);
   });
-  if(parsed.timelinePlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.timelinePlaces.length-8)+' more';list.appendChild(m);}
-  body.appendChild(list);
-}
-
-function renderGpxPreview(body){
-  var list=document.createElement('div');list.className='preview-list';
-  parsed.gpxPlaces.slice(0,8).forEach(function(p){
-    var row=document.createElement('div');row.className='preview-item';
-    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
-      '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
-    list.appendChild(row);
-  });
-  if(parsed.gpxPlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.gpxPlaces.length-8)+' more';list.appendChild(m);}
-  body.appendChild(list);
-}
-
-function renderKmlPreview(body){
-  var list=document.createElement('div');list.className='preview-list';
-  parsed.kmlPlaces.slice(0,8).forEach(function(p){
-    var row=document.createElement('div');row.className='preview-item';
-    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
-      '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
-    list.appendChild(row);
-  });
-  if(parsed.kmlPlaces.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(parsed.kmlPlaces.length-8)+' more';list.appendChild(m);}
+  if(places.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(places.length-8)+' more';list.appendChild(m);}
   body.appendChild(list);
 }
 
@@ -2545,14 +2704,12 @@ async function compressToBase64(buffer,filename,maxDim,quality){
 // {base64,sizeBytes} from the first pass that fits, or null if even the smallest pass doesn't.
 async function compressUnderCap(buffer,filename,capBytes){
   var passes=[[1200,0.75],[900,0.6],[700,0.5],[500,0.4],[350,0.35]];
-  var result=null
   for(var i=0;i<passes.length;i++){
     var b64=await compressToBase64(buffer,filename,passes[i][0],passes[i][1]);
     var sizeB=Math.round(b64.length*0.75);
-    result={base64:b64,sizeBytes:sizeB};
-    if(sizeB<=capBytes)return result;
+    if(sizeB<=capBytes)return {base64:b64,sizeBytes:sizeB};
   }
-  return result.sizeBytes<=capBytes?result:null;
+  return null; // even the smallest pass didn't fit under capBytes
 }
 
 async function doAIAssist(){

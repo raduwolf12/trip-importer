@@ -1,12 +1,12 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.13.0",
+  "version": "1.17.1",
   "apiVersion": 1,
   "type": "page",
   "trek": ">=3.3.0 <4.0.0",
   "author": "self-hosted",
-  "description": "Reconstruct one or more past trips from Polarsteps exports — select multiple detected journeys and each becomes its own trip, auto-scoped to its own dates, with the step photos imported too. Also imports booking PDFs/ICS invites, GPS photos, Google Photos Takeout, GPX/KML tracks, expense CSVs and Google Maps timeline, all date-matched to the right trip instead of dumped into one. Creates the trip, journal, places, day notes, transports, accommodations and costs automatically — with one-click undo.",
+  "description": "Reconstruct one or more past trips from Polarsteps exports \u2014 select multiple detected journeys and each becomes its own trip, auto-scoped to its own dates, with the step photos imported too. Also imports booking PDFs/ICS invites, GPS photos, Google Photos Takeout, GPX/KML tracks, expense CSVs and Google Maps timeline, all date-matched to the right trip instead of dumped into one. Creates the trip, journal, places, day notes, transports, accommodations and costs automatically \u2014 with one-click undo.",
   "icon": "PackageOpen",
   "license": "MIT",
   "nativeModules": false,
@@ -36,9 +36,14 @@
     "polarsteps.s3.amazonaws.com"
   ],
   "settings": [
-    { "key": "trek_base_url", "label": "TREK public base URL", "input_type": "text",
-      "scope": "user", "required": false,
+    {
+      "key": "trek_base_url",
+      "label": "TREK public base URL",
+      "input_type": "text",
+      "scope": "user",
+      "required": false,
       "placeholder": "https://trek.example.com",
-      "hint": "Only needed for the photo-search feature (lets your imported photos show up in TREK's native photo picker, including for journal entries). Enter the URL you personally access this TREK instance at, under your own Settings — used to turn this plugin's own uploaded-file paths into absolute links. Leave blank to disable photo search for yourself; nothing else in this plugin depends on it." }
+      "hint": "Only needed for the photo-search feature (lets your imported photos show up in TREK's native photo picker, including for journal entries). Enter the URL you personally access this TREK instance at, under your own Settings \u2014 used to turn this plugin's own uploaded-file paths into absolute links. Leave blank to disable photo search for yourself; nothing else in this plugin depends on it."
+    }
   ]
 }
