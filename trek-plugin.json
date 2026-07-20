@@ -6,7 +6,7 @@
   "type": "page",
   "trek": ">=3.4.0 <4.0.0",
   "author": "raduwolf12",
-  "description": "Reconstruct one or more past trips from Polarsteps exports \u2014 select multiple detected journeys and each becomes its own trip, auto-scoped to its own dates, with the step photos imported too. Also imports booking PDFs/ICS invites, GPS photos, Google Photos Takeout, GPX/KML tracks, expense CSVs and Google Maps timeline, all date-matched to the right trip instead of dumped into one. Creates the trip, journal, places, day notes, transports, accommodations and costs automatically \u2014 with one-click undo.",
+  "description": "Reconstruct past trips from Polarsteps, GPS photos, booking PDFs/ICS, expense CSVs and Google Timeline \u2014 auto-creates the trip, journal, places, bookings and costs, with multi-trip detection and undo.",
   "icon": "PackageOpen",
   "license": "MIT",
   "nativeModules": false,
