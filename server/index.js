@@ -630,7 +630,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.17.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.18.1 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -884,7 +884,18 @@ module.exports = definePlugin({
     {
       method: 'POST', path: '/import', auth: true,
       async handler(req, ctx) {
-        const { tripConfig, polarsteps, bookings, gpsPlaces, timelinePlaces, expenses, options, progress: progressIn } = req.body || {}
+        const {
+          tripConfig, polarsteps, bookings, gpsPlaces, timelinePlaces, expenses, options, progress: progressIn,
+          // Pagination fields: bookings/expenses/places can each arrive as just this round's
+          // window (client-sliced) rather than the full array, mirroring polarsteps.steps'
+          // existing _stepOffset/_totalSteps pattern — needed once a source alone can push the
+          // request past the plugin-route proxy's real ~100KB body-size ceiling (confirmed:
+          // server sets a global express.json({limit:'100kb'}) applied to every plugin route).
+          // Absent (an unpaginated call, or an older client) defaults to "this is everything,
+          // starting at 0" via the ?? / || fallbacks where each is consumed below.
+          bookingsOffset, totalBookings, expensesOffset, totalExpenses,
+          places: placesIn, placesOffset, totalPlaces,
+        } = req.body || {}
         const result = await tryAttempt(async () => {
           const log = []; const errors = []
           let tripId = null
@@ -934,6 +945,12 @@ module.exports = definePlugin({
           // (day rows, itinerary assignment, a place per stop on a map, etc).
           if (options?.journalOnly) {
             const steps = polarsteps?.steps || []
+            // steps here is whatever slice the client sent this round (see importOneTarget()'s
+            // STEPS_PER_ROUND windowing) — _stepOffset/_totalSteps carry the true position/count
+            // across the whole paginated step list. Absent (an unpaginated call, or no
+            // polarsteps at all) defaults to "this is the whole list starting at 0".
+            const stepOffset = polarsteps?._stepOffset || 0
+            const totalSteps = polarsteps?._totalSteps ?? (stepOffset + steps.length)
             if (!polarsteps || !options?.importJournal) {
               // Must mark done — otherwise the client's resumable loop (which only stops on
               // progress.done) would keep resending this exact same no-op call up to its 200-round cap.
@@ -964,10 +981,14 @@ module.exports = definePlugin({
               } catch (e) { errors.push('Journal: ' + e.message) }
             }
             if (journeyId && p.journal < totalSteps) {
+              // p.journal is a GLOBAL index across the whole (possibly paginated) step list;
+              // `steps` here is only this round's window, so it must be re-based by stepOffset
+              // on both the loop bound and the lookup — mirrors section 2's identical pattern
+              // below for the normal (non-journal-only) path.
               let i = p.journal
-              for (; i < steps.length; i++) {
+              for (; i < stepOffset + steps.length; i++) {
                 if (!withinBudget()) break
-                const step = steps[i]
+                const step = steps[i - stepOffset]
                 try {
                   const weatherNote = step.weather
                     ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
@@ -989,7 +1010,7 @@ module.exports = definePlugin({
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
-            p.done = p.journal >= steps.length
+            p.done = p.journal >= totalSteps
             return { ok: true, tripId: null, log, errors, progress: p }
           }
 
@@ -1071,6 +1092,12 @@ module.exports = definePlugin({
           } catch (_e) {}
 
           const steps = polarsteps?.steps || []
+          // steps is whatever slice the client sent this round (see importOneTarget()'s
+          // STEPS_PER_ROUND windowing in client/index.html) — _stepOffset/_totalSteps carry the
+          // true position/count across the whole paginated step list. Absent (an unpaginated
+          // call, or no polarsteps at all) defaults to "this is the whole list starting at 0".
+          const stepOffset = polarsteps?._stepOffset || 0
+          const totalSteps = polarsteps?._totalSteps ?? (stepOffset + steps.length)
 
           // ── 1.5. Ensure day rows exist for the trip's date range ──────────
           // Nothing in this plugin (or, per available docs, TREK itself) auto-creates day rows
@@ -1091,7 +1118,22 @@ module.exports = definePlugin({
               rangeEnd = rangeEnd || tripInfo?.end_date || null
             } catch (_e) {}
           }
-          if (!rangeStart || !rangeEnd) {
+          {
+            // REGRESSION FIX: this had reverted to only falling back to the data's own span
+            // when the trip had NO declared range at all (`if (!rangeStart || !rangeEnd)`) —
+            // the exact pre-1.6.4 bug. Since a Polarsteps trip (or an existing TREK trip)
+            // almost always DOES have a start/end date, that fallback essentially never fires,
+            // so any GPS/timeline/booking/expense date outside the Polarsteps-reported window
+            // gets no day row and silently never lands on the itinerary. Always EXTEND instead
+            // of only falling back — see the original 1.6.4 fix notes in CLAUDE.md.
+            //
+            // Caveat now that `steps` can be a per-round PAGE rather than the full list (see
+            // stepOffset/totalSteps above): this only sees the current page's step dates, so a
+            // narrow first page could under-extend the range for a large paginated trip. The
+            // client's own date-range computation (prepareStep3()/importOneTarget(), run
+            // against the FULL in-memory arrays before this loop starts) is the real fix for
+            // that — this stays as defense-in-depth, not the sole source of truth.
+            //
             // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a single
             // malformed date (e.g. a raw un-normalized CSV cell, or a stray non-date string)
             // sorts unpredictably against real ISO dates and can silently produce a garbage
@@ -1108,7 +1150,10 @@ module.exports = definePlugin({
             }
             for (const e of (expenses || [])) if (isoDateRe.test(e.date)) allDates.push(e.date)
             allDates.sort()
-            if (allDates.length) { rangeStart = rangeStart || allDates[0]; rangeEnd = rangeEnd || allDates[allDates.length - 1] }
+            if (allDates.length) {
+              if (!rangeStart || allDates[0] < rangeStart) rangeStart = allDates[0]
+              if (!rangeEnd || allDates[allDates.length - 1] > rangeEnd) rangeEnd = allDates[allDates.length - 1]
+            }
           }
 
           // Sanity cap: the data-derived fallback above takes the min/max of every date across
@@ -1298,21 +1343,34 @@ module.exports = definePlugin({
           }
 
           // ── 3. GPS + Timeline Places — deduplicated and geocoded ──────────
-          // Recomputed fresh every call — deterministic given the same gpsPlaces/timelinePlaces/
-          // polarsteps input (which the client always resends unchanged), so p.places stays a
-          // valid resume index into it across calls.
+          // Two ways this data can arrive: the NEW way, `placesIn` — the client ports
+          // clusterByProximity()/haversine() itself (see client/index.html) and computes the
+          // deduplicated, clustered places list ONCE up front, then sends only this round's
+          // window of it (placesOffset/totalPlaces, same pattern as polarsteps.steps) — so the
+          // full gpsPlaces/timelinePlaces arrays never need to be resent every round. The OLD
+          // way — no `totalPlaces` sent — recomputes clustering fresh server-side from the full
+          // arrays every call, exactly as this route always did; kept as a fallback so an older
+          // client (or any caller that doesn't pre-cluster) still works.
           let clusters = []
+          let totalClusters = 0
+          const clusterOffset = placesOffset || 0
           if (options?.importPlaces) {
-            const allRawPlaces = [...(gpsPlaces || []), ...(timelinePlaces || [])]
-            const polarstepsCoords = steps.filter(s => s.location?.lat).map(s => ({ lat: s.location.lat, lng: s.location.lon }))
-            const deduplicated = allRawPlaces.filter(pt => !polarstepsCoords.some(ps => haversine(ps.lat, ps.lng, pt.lat, pt.lng) < 800))
-            clusters = clusterByProximity(deduplicated, 800)
+            if (Array.isArray(placesIn) && totalPlaces != null) {
+              clusters = placesIn
+              totalClusters = totalPlaces
+            } else {
+              const allRawPlaces = [...(gpsPlaces || []), ...(timelinePlaces || [])]
+              const polarstepsCoords = steps.filter(s => s.location?.lat).map(s => ({ lat: s.location.lat, lng: s.location.lon }))
+              const deduplicated = allRawPlaces.filter(pt => !polarstepsCoords.some(ps => haversine(ps.lat, ps.lng, pt.lat, pt.lng) < 800))
+              clusters = clusterByProximity(deduplicated, 800)
+              totalClusters = clusters.length
+            }
 
-            if (p.places < clusters.length) {
+            if (p.places < totalClusters) {
               let i = p.places
-              for (; i < clusters.length; i++) {
+              for (; i < clusterOffset + clusters.length; i++) {
                 if (!withinBudget()) break
-                const cluster = clusters[i]
+                const cluster = clusters[i - clusterOffset]
                 try {
                   // Reverse geocode for a real place name
                   let name = cluster.name || null
@@ -1339,8 +1397,8 @@ module.exports = definePlugin({
               p.places = i
             }
             let msg = 'Created ' + p.placesCreated + ' places (geocoded, deduplicated)'
-            if (p.places < clusters.length) msg += ' (' + (clusters.length - p.places) + ' more queued)'
-            if (p.placesCreated || p.places < clusters.length) log.push({ type: 'places', message: msg })
+            if (p.places < totalClusters) msg += ' (' + (totalClusters - p.places) + ' more queued)'
+            if (p.placesCreated || p.places < totalClusters) log.push({ type: 'places', message: msg })
           }
 
           // ── 4. Upload photos (one at a time, compressed client-side) ──────
@@ -1355,12 +1413,18 @@ module.exports = definePlugin({
           // derives the reservation's day from this, no day_id needed.
           const combineDateTime = (date, time) => date ? (date + (time ? 'T' + time : '')) : (time || null)
 
-          const bookingsActive = !!(options?.importBookings && bookings?.length)
-          if (bookingsActive && p.bookings < bookings.length) {
+          // totalBookings/bookingsOffset: same pagination pattern as polarsteps.steps — a large
+          // bookings array (many PDF/ICS/email confirmations) can push the request past the
+          // ~100KB proxy ceiling on its own. Falls back to the plain array length when absent
+          // (an unpaginated call sends everything, offset 0).
+          const totalBookingsCount = totalBookings ?? (bookings?.length || 0)
+          const bookingOffset = bookingsOffset || 0
+          const bookingsActive = !!(options?.importBookings && totalBookingsCount)
+          if (bookingsActive && p.bookings < totalBookingsCount) {
             let i = p.bookings
-            for (; i < bookings.length; i++) {
+            for (; i < bookingOffset + (bookings?.length || 0); i++) {
               if (!withinBudget()) break
-              const b = bookings[i]
+              const b = bookings[i - bookingOffset]
               try {
                 await sleep(150)
                 if (b.type === 'hotel') {
@@ -1426,18 +1490,22 @@ module.exports = definePlugin({
           }
           if (bookingsActive) {
             let msg = 'Created ' + p.bookingsRes + ' transports, ' + p.bookingsAcc + ' accommodations'
-            if (p.bookings < bookings.length) msg += ' (' + (bookings.length - p.bookings) + ' more queued)'
+            if (p.bookings < totalBookingsCount) msg += ' (' + (totalBookingsCount - p.bookings) + ' more queued)'
             log.push({ type: 'bookings', message: msg })
             if (p.bookingsReview) log.push({ type: 'bookings', message: p.bookingsReview + ' hotel booking(s) need manual review (no matching trip day)' })
           }
 
           // ── 6. Costs ──────────────────────────────────────────────────────
-          const costsActive = !!(options?.importCosts && expenses?.length)
-          if (costsActive && p.costs < expenses.length) {
+          // totalExpenses/expensesOffset: same pagination pattern as bookings/steps above — a
+          // large expense CSV can push the request past the ~100KB proxy ceiling on its own.
+          const totalExpensesCount = totalExpenses ?? (expenses?.length || 0)
+          const expenseOffset = expensesOffset || 0
+          const costsActive = !!(options?.importCosts && totalExpensesCount)
+          if (costsActive && p.costs < totalExpensesCount) {
             let i = p.costs
-            for (; i < expenses.length; i++) {
+            for (; i < expenseOffset + (expenses?.length || 0); i++) {
               if (!withinBudget()) break
-              const e = expenses[i]
+              const e = expenses[i - expenseOffset]
               try {
                 if (!e.amount || !e.name) continue
                 const cost = await ctx.costs.create(tripId, {
@@ -1457,15 +1525,15 @@ module.exports = definePlugin({
           }
           if (costsActive) {
             let msg = 'Created ' + p.costsCreated + ' cost entries'
-            if (p.costs < expenses.length) msg += ' (' + (expenses.length - p.costs) + ' more queued)'
+            if (p.costs < totalExpensesCount) msg += ' (' + (totalExpensesCount - p.costs) + ' more queued)'
             log.push({ type: 'costs', message: msg })
           }
 
           p.done = p.days >= dateRange.length &&
             (!journalActive || p.journal >= totalSteps) &&
-            (!options?.importPlaces || p.places >= clusters.length) &&
-            (!bookingsActive || p.bookings >= bookings.length) &&
-            (!costsActive || p.costs >= expenses.length)
+            (!options?.importPlaces || p.places >= totalClusters) &&
+            (!bookingsActive || p.bookings >= totalBookingsCount) &&
+            (!costsActive || p.costs >= totalExpensesCount)
 
           return { ok: true, tripId, log, errors, progress: p }
         })

@@ -2209,6 +2209,84 @@ async function doImport(){
   rh();
 }
 
+// ── Distance between two coords in metres — mirrors server/index.js's haversine() exactly ──
+function haversine(lat1,lng1,lat2,lng2){
+  var R=6371000;
+  var dLat=(lat2-lat1)*Math.PI/180;
+  var dLng=(lng2-lng1)*Math.PI/180;
+  var a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+// ── Cluster GPS points within radius into groups — mirrors server/index.js's
+// clusterByProximity() exactly, including the 1.6.3 date-preservation fix (proximity alone
+// isn't enough to merge two points: a landmark or hotel revisited on different days must stay
+// assignable to each of those days, not collapse into one place tied to whichever visit
+// happened to be processed first). Moved client-side (previously ran server-side, recomputed
+// fresh from the FULL gpsPlaces/timelinePlaces arrays on every resumable /import round) so
+// those full arrays no longer need to be resent every round — see computeTargetPlaces() below.
+function clusterByProximity(places,radiusMetres){
+  radiusMetres=radiusMetres||800;
+  var clusters=[];
+  for(var i=0;i<places.length;i++){
+    var p=places[i];
+    var match=clusters.find(function(c){return haversine(c.lat,c.lng,p.lat,p.lng)<radiusMetres&&(!c.date||!p.date||c.date===p.date);});
+    if(match){
+      match.members.push(p);
+      if(!match.date&&p.date)match.date=p.date;
+      match.lat=match.members.reduce(function(s,m){return s+m.lat;},0)/match.members.length;
+      match.lng=match.members.reduce(function(s,m){return s+m.lng;},0)/match.members.length;
+    }else{
+      clusters.push({lat:p.lat,lng:p.lng,members:[p],name:p.name,date:p.date});
+    }
+  }
+  return clusters;
+}
+
+// Computes the deduplicated, clustered places list for one target — mirrors /import's own
+// "3. GPS + Timeline Places" section in server/index.js exactly (same dedup-against-Polarsteps-
+// coords logic, same 800m cluster radius), just moved here so it runs ONCE up front instead of
+// being recomputed server-side from the FULL gpsPlaces/timelinePlaces arrays on every resumable
+// round. The result is usually far smaller than the raw point arrays (many points collapse into
+// one cluster), and only THIS needs to be paginated per round below — the raw arrays never have
+// to be sent at all now. Server still knows how to cluster from raw gpsPlaces/timelinePlaces
+// itself as a fallback (see /import's section 3), in case `places`/`totalPlaces` are absent.
+function computeTargetPlaces(target){
+  if(!target.gpsPlaces.length&&!target.timelinePlaces.length)return [];
+  var polarstepsCoords=((target.polarsteps&&target.polarsteps.steps)||[]).filter(function(s){return s.location&&s.location.lat!=null;}).map(function(s){return {lat:s.location.lat,lng:s.location.lon};});
+  var allRawPlaces=(target.gpsPlaces||[]).concat(target.timelinePlaces||[]);
+  var deduplicated=allRawPlaces.filter(function(pt){return !polarstepsCoords.some(function(ps){return haversine(ps.lat,ps.lng,pt.lat,pt.lng)<800;});});
+  return clusterByProximity(deduplicated,800);
+}
+
+// Extends [startDate,endDate] to cover every well-formed date found across a target's own
+// Polarsteps steps/bookings/expenses/computed-places — mirrors /import's own day-range-
+// extension fallback (server/index.js section 1.5), but runs here on the FULL in-memory data
+// before any per-round pagination, which is what makes it reliable for a large trip: once
+// steps/bookings/expenses/places are paginated (see importOneTarget() below), the server only
+// ever sees one round's window of each at a time, so its own version of this same scan could
+// under-extend the range for data that hasn't been sent yet. Called once per target before its
+// resumable loop starts, so tripConfig.startDate/endDate already cover the full span from the
+// very first request.
+function extendDateRange(startDate,endDate,target,places){
+  var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
+  var allDates=[];
+  ((target.polarsteps&&target.polarsteps.steps)||[]).forEach(function(s){
+    if(isoDateRe.test(s.date))allDates.push(s.date);
+    if(isoDateRe.test(s.endDate))allDates.push(s.endDate);
+  });
+  (target.bookings||[]).forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
+  (target.expenses||[]).forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+  (places||[]).forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+  allDates.sort();
+  var result={startDate:startDate,endDate:endDate};
+  if(allDates.length){
+    if(!result.startDate||allDates[0]<result.startDate)result.startDate=allDates[0];
+    if(!result.endDate||allDates[allDates.length-1]>result.endDate)result.endDate=allDates[allDates.length-1];
+  }
+  return result;
+}
+
 // Runs the full resumable /import loop plus the PDF-attach/photo-upload phases for ONE trip
 // target, writing progress into its own `progList` container with ids prefixed by
 // `target.key` (so multiple targets' progress items — same underlying log `type`s from the
@@ -2216,10 +2294,18 @@ async function doImport(){
 // entire body of doImport() so doImport() can call this once per active target.
 async function importOneTarget(target,options,progList,isPdfTarget){
   var kp=target.key+'-';
+  var pdfFiles=isPdfTarget?(parsed._pdfFiles||[]):[];
+  // Computed early (before tripConfig) so both the initial trip-creation call AND every
+  // resumed round's tripConfig (which resends target.startDate/endDate every time — see the
+  // do-while loop below) already reflect the extended range, not just the Polarsteps-declared
+  // or user-typed one.
+  var allPlacesForRange=options.importPlaces?computeTargetPlaces(target):[];
+  var extendedRange=extendDateRange(target.startDate||null,target.endDate||null,target,allPlacesForRange);
+  target.startDate=extendedRange.startDate;
+  target.endDate=extendedRange.endDate;
   var tripConfig=target.mode==='existing'?
     {mode:'existing',tripId:target.existingTripId}:
     {mode:'new',title:target.title||'Imported Trip',startDate:target.startDate||null,endDate:target.endDate||null};
-  var pdfFiles=isPdfTarget?(parsed._pdfFiles||[]):[];
 
   // Journal-only mode never creates a trip at all (ctx.journal.createJourney's trip_ids is
   // optional) — every trip-scoped step (trip/days/places/bookings/pdf-attach/costs) is
@@ -2251,28 +2337,63 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // rarely finishes everything for a non-trivial trip. Loop, feeding each response's `progress`
   // back in as the next call's input and switching to {mode:'existing', tripId} after the
   // first call, until the server reports every section done.
-  // Strip the steps array out of the base payload to avoid 413 on large trips.
-  // Steps are sent as a rolling window each round based on where progress.journal is at.
-  var STEPS_PER_ROUND=40;
+  //
+  // Every per-item array below (steps/bookings/expenses/places) is stripped from the BASE
+  // payload and instead injected as a rolling window each round, sized to a source's own
+  // resumable progress index (progress.journal/bookings/costs/places) — needed because the
+  // plugin-route proxy's real request-body ceiling is a CONFIRMED ~100KB
+  // (express.json({limit:'100kb'}) in TREK's own server/src/middleware/globalMiddleware.ts,
+  // applied to every plugin route with no override), and any one of these sources alone can
+  // exceed that for a large trip (100+ Polarsteps steps, a big expense CSV, hundreds of GPS
+  // photo clusters). Small sources are sent whole every round unchanged, exactly as before —
+  // the windowing below only ever engages once a source's own full size would risk it.
+  var STEPS_PER_ROUND=40, BOOKINGS_PER_ROUND=40, EXPENSES_PER_ROUND=40, PLACES_PER_ROUND=40;
   var allSteps=(target.polarsteps&&target.polarsteps.steps)||[];
   var polarstepsMeta=target.polarsteps?Object.assign({},target.polarsteps,{steps:[]}):{};
+  var allBookings=target.bookings||[];
+  var allExpenses=target.expenses||[];
+  // Clustering (computeTargetPlaces) runs ONCE instead of every round server-side — see its
+  // own comment above for why. gpsPlaces/timelinePlaces themselves are never sent to /import
+  // anymore; only the (usually much smaller) computed places list is. Reuses the same
+  // computation already done above for extendDateRange(), rather than clustering twice.
+  var allPlaces=allPlacesForRange;
   var importBody={
-    polarsteps:target.polarsteps&&allSteps.length<=STEPS_PER_ROUND?target.polarsteps:polarstepsMeta,
-    bookings:target.bookings,
-    gpsPlaces:target.gpsPlaces,
-    timelinePlaces:target.timelinePlaces,
-    expenses:target.expenses,
+    polarsteps:allSteps.length<=STEPS_PER_ROUND?(target.polarsteps||polarstepsMeta):polarstepsMeta,
+    bookings:allBookings.length<=BOOKINGS_PER_ROUND?allBookings:[],
+    totalBookings:allBookings.length,
+    places:allPlaces.length<=PLACES_PER_ROUND?allPlaces:[],
+    totalPlaces:allPlaces.length,
+    expenses:allExpenses.length<=EXPENSES_PER_ROUND?allExpenses:[],
+    totalExpenses:allExpenses.length,
     options,
   };
   var progress=undefined,result=null,round=0,allErrors=[];
   do{
     round++;
-    // For large Polarsteps trips, inject just the steps needed this round
+    // Inject just this round's window for whichever sources are actually large — a source at
+    // or under its own PER_ROUND cap was already sent whole in importBody above and needs no
+    // per-round slicing (progress.X still advances normally; it just always covers the same
+    // fixed unchanging array).
     var callBody=Object.assign({tripConfig:tripConfig,progress:progress},importBody);
     if(allSteps.length>STEPS_PER_ROUND&&target.polarsteps){
       var stepOffset=progress?progress.journal||0:0;
       var stepSlice=allSteps.slice(stepOffset,stepOffset+STEPS_PER_ROUND);
       callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:stepSlice,_stepOffset:stepOffset,_totalSteps:allSteps.length});
+    }
+    if(allBookings.length>BOOKINGS_PER_ROUND){
+      var bookingsOffset=progress?progress.bookings||0:0;
+      callBody.bookings=allBookings.slice(bookingsOffset,bookingsOffset+BOOKINGS_PER_ROUND);
+      callBody.bookingsOffset=bookingsOffset;
+    }
+    if(allExpenses.length>EXPENSES_PER_ROUND){
+      var expensesOffset=progress?progress.costs||0:0;
+      callBody.expenses=allExpenses.slice(expensesOffset,expensesOffset+EXPENSES_PER_ROUND);
+      callBody.expensesOffset=expensesOffset;
+    }
+    if(allPlaces.length>PLACES_PER_ROUND){
+      var placesOffset=progress?progress.places||0:0;
+      callBody.places=allPlaces.slice(placesOffset,placesOffset+PLACES_PER_ROUND);
+      callBody.placesOffset=placesOffset;
     }
     result=await invoke('/import','POST',callBody);
 
@@ -2335,20 +2456,30 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // oversized PDFs are skipped here rather than sent and rejected — the booking itself already
   // made it in via the text pipeline either way.
   //
-  // The proxy's real body-size ceiling is undocumented, and a photo/PDF upload was confirmed
-  // (against a real TREK instance) to still 413 under the previous 900KB target — so that
-  // number was never actually a safe margin, just "well under 10MB". These caps are set much
-  // lower as a defensive correction; PHOTO_UPLOAD_MAX_BASE64 also drives compressUnderCap()'s
-  // shrink-retry ladder above, since (unlike a PDF) a photo can still be shrunk further to fit.
-  var PDF_ATTACH_MAX_BASE64=300*1024;
-  var PHOTO_UPLOAD_MAX_BASE64=250*1024;
+  // The real ceiling is now CONFIRMED, not guessed: TREK's server sets a global
+  // `express.json({limit:'100kb'})` in server/src/middleware/globalMiddleware.ts, and the
+  // plugin route proxy (plugins-proxy.controller.ts) forwards `req.body` straight through with
+  // no override — so it applies to every plugin route, this one included. 100kb here is the
+  // `bytes` package's 1024-based unit (102,400 bytes) for the WHOLE JSON request body, not just
+  // the base64 payload — tripId/filename/mimetype/description/etc all share that budget too.
+  // Both earlier guesses (900KB, then 250-300KB after a real 413) were still far above this
+  // actual number.
+  //
+  // CAPS ARE IN BASE64-STRING BYTES — that's what actually goes over the wire in the JSON
+  // body, and it's already ~90KB even after this fix (85KB base64 + ~10KB JSON overhead still
+  // 413'd) was traced to comparing the DECODED-estimate size (`b64.length*0.75`, converting
+  // the base64 string back down to ~raw bytes) against these caps instead of the base64 STRING
+  // LENGTH itself — so the actual base64 sent was up to 4/3 (33%) larger than the cap, well
+  // over 100KB even though the check said it was fine. Fixed by comparing b64.length directly.
+  var PDF_ATTACH_MAX_BASE64=85*1024;
+  var PHOTO_UPLOAD_MAX_BASE64=85*1024;
   if(options.importBookings&&result.tripId&&pdfFiles.length){
     setProgRunning(kp+'pdfbooks');
     var pdfOk=0,pdfFail=0,pdfTooBig=0;
     for(var pb of pdfFiles){
       try{
         var b64=await new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result.split(',')[1]);};r.onerror=rej;r.readAsDataURL(pb);});
-        if(Math.round(b64.length*0.75)>PDF_ATTACH_MAX_BASE64){pdfTooBig++;continue;}
+        if(b64.length>PDF_ATTACH_MAX_BASE64){pdfTooBig++;continue;}
         var pr=await invoke('/import-pdf-booking','POST',{
           tripId:result.tripId,filename:pb.name,base64:b64,mimetype:pb.type||'application/pdf'
         });
@@ -2698,16 +2829,24 @@ async function compressToBase64(buffer,filename,maxDim,quality){
 // Compress a photo down through progressively smaller passes until its base64 payload fits
 // under capBytes, instead of compressing once at a fixed size and just discarding the photo
 // if that single attempt came out too big. Needed because the plugin-route proxy's real
-// request-body ceiling is undocumented and confirmed (against a real TREK instance) to 413
-// even under the previous single-pass 900KB target — so a fixed compression level was never
-// going to reliably land under an unknown, apparently-lower limit. Returns
-// {base64,sizeBytes} from the first pass that fits, or null if even the smallest pass doesn't.
+// request-body ceiling is now CONFIRMED at 100kb total (see PHOTO_UPLOAD_MAX_BASE64's comment
+// in importOneTarget() for the exact source) — both earlier guesses (900KB, then 250-300KB)
+// were still far above it, so a fixed compression level was never going to land under the
+// real number. The last couple of passes are aggressive on purpose: getting a small, blurry
+// photo attached beats getting none at all. Returns {base64,sizeBytes} from the first pass
+// that fits, or null if even the smallest pass doesn't.
+//
+// capBytes caps b64.length DIRECTLY — that's the actual base64 STRING that goes over the wire
+// in the JSON body. A previous version compared `b64.length*0.75` (the DECODED/raw-byte
+// estimate) against capBytes instead, so a "fits under 90KB" pass was really producing a
+// base64 string up to 4/3 (33%) LARGER than that — a real 413 in production despite this
+// function reporting success. sizeBytes (still `*0.75`) is kept for logging/display only, it
+// is never what gates the size check.
 async function compressUnderCap(buffer,filename,capBytes){
-  var passes=[[1200,0.75],[900,0.6],[700,0.5],[500,0.4],[350,0.35]];
+  var passes=[[1200,0.75],[900,0.6],[700,0.5],[500,0.4],[350,0.35],[250,0.3],[150,0.25]];
   for(var i=0;i<passes.length;i++){
     var b64=await compressToBase64(buffer,filename,passes[i][0],passes[i][1]);
-    var sizeB=Math.round(b64.length*0.75);
-    if(sizeB<=capBytes)return {base64:b64,sizeBytes:sizeB};
+    if(b64.length<=capBytes)return {base64:b64,sizeBytes:Math.round(b64.length*0.75)};
   }
   return null; // even the smallest pass didn't fit under capBytes
 }
