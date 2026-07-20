@@ -983,6 +983,7 @@ window.addEventListener('message',function(e){
 // ── State ──────────────────────────────────────────────────────────────────
 var files=[],imgFiles=[];
 var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+var previewOpenSources={};
 var tripMode='new';
 var tripTargets=[]; // computeTripTargets() result — the source of truth once step 3 is entered
 
@@ -1089,6 +1090,7 @@ async function doAnalyze(){
   var btn=document.getElementById('analyze-btn');btn.disabled=true;
   showSt1('Reading files…','');
   parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  previewOpenSources={};
 
   var zipFiles=[],jsonFiles=[],pdfFiles=[],txtFiles=[],csvFiles=[],gpxFiles=[],kmlFiles=[],kmzFiles=[],icsFiles=[];
   imgFiles=[]; // reset global
@@ -1391,7 +1393,7 @@ function renderSourceCard(parent,id,iconClass,icon,name,status,hasData,renderFn)
     '<div class="source-label"><div class="source-name">'+name+'</div>'+
     '<div class="source-status'+(hasData?' found':'')+'">'+escHtml(status)+'</div></div>'+
     (hasData?'<button class="source-toggle" onclick="toggleSource(event,\''+id+'\')">Details</button>':'');
-  var body=document.createElement('div');body.className='source-body';body.id='src-body-'+id;
+  var body=document.createElement('div');body.className='source-body'+(previewOpenSources[id]?' open':'');body.id='src-body-'+id;
   if(hasData)renderFn(body);
   hdr.addEventListener('click',function(e){if(e.target.tagName==='BUTTON')return;if(hasData)toggleSource(e,id);});
   card.appendChild(hdr);card.appendChild(body);
@@ -1400,7 +1402,9 @@ function renderSourceCard(parent,id,iconClass,icon,name,status,hasData,renderFn)
 
 function toggleSource(e,id){
   var body=document.getElementById('src-body-'+id);
-  body.classList.toggle('open');rh();
+  body.classList.toggle('open');
+  previewOpenSources[id]=body.classList.contains('open');
+  rh();
 }
 
 function toggleJourneySelected(idx,checked){
@@ -1426,7 +1430,8 @@ function renderPolarstepsPreview(body){
       var row=document.createElement('label');row.className='preview-item';row.style.cursor='pointer';
       var cb=document.createElement('input');cb.type='checkbox';cb.checked=selected.indexOf(i)>=0;
       cb.style.flexShrink='0';
-      cb.addEventListener('change',function(){toggleJourneySelected(i,cb.checked);});
+      cb.addEventListener('click',function(e){e.stopPropagation();});
+      cb.addEventListener('change',function(e){e.stopPropagation();toggleJourneySelected(i,cb.checked);});
       var nameEl=document.createElement('span');nameEl.className='pi-name';nameEl.textContent=p.name;
       var metaEl=document.createElement('span');metaEl.className='pi-meta';
       metaEl.textContent=(p.startDate?p.startDate+' → '+p.endDate+' · ':'')+p.stepCount+' stops';
@@ -2348,6 +2353,7 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // photo clusters). Small sources are sent whole every round unchanged, exactly as before —
   // the windowing below only ever engages once a source's own full size would risk it.
   var STEPS_PER_ROUND=40, BOOKINGS_PER_ROUND=40, EXPENSES_PER_ROUND=40, PLACES_PER_ROUND=40;
+  var IMPORT_MAX_JSON_BYTES=85*1024;
   var allSteps=(target.polarsteps&&target.polarsteps.steps)||[];
   var polarstepsMeta=target.polarsteps?Object.assign({},target.polarsteps,{steps:[]}):{};
   var allBookings=target.bookings||[];
@@ -2375,25 +2381,53 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     // per-round slicing (progress.X still advances normally; it just always covers the same
     // fixed unchanging array).
     var callBody=Object.assign({tripConfig:tripConfig,progress:progress},importBody);
+    var stepOffset=progress?progress.journal||0:0,stepLimit=STEPS_PER_ROUND;
     if(allSteps.length>STEPS_PER_ROUND&&target.polarsteps){
-      var stepOffset=progress?progress.journal||0:0;
-      var stepSlice=allSteps.slice(stepOffset,stepOffset+STEPS_PER_ROUND);
+      stepOffset=progress?progress.journal||0:0;
+      var stepSlice=allSteps.slice(stepOffset,stepOffset+stepLimit);
       callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:stepSlice,_stepOffset:stepOffset,_totalSteps:allSteps.length});
     }
+    var bookingsOffset=0,bookingsLimit=BOOKINGS_PER_ROUND;
     if(allBookings.length>BOOKINGS_PER_ROUND){
-      var bookingsOffset=progress?progress.bookings||0:0;
-      callBody.bookings=allBookings.slice(bookingsOffset,bookingsOffset+BOOKINGS_PER_ROUND);
+      bookingsOffset=progress?progress.bookings||0:0;
+      callBody.bookings=allBookings.slice(bookingsOffset,bookingsOffset+bookingsLimit);
       callBody.bookingsOffset=bookingsOffset;
     }
+    var expensesOffset=0,expensesLimit=EXPENSES_PER_ROUND;
     if(allExpenses.length>EXPENSES_PER_ROUND){
-      var expensesOffset=progress?progress.costs||0:0;
-      callBody.expenses=allExpenses.slice(expensesOffset,expensesOffset+EXPENSES_PER_ROUND);
+      expensesOffset=progress?progress.costs||0:0;
+      callBody.expenses=allExpenses.slice(expensesOffset,expensesOffset+expensesLimit);
       callBody.expensesOffset=expensesOffset;
     }
+    var placesOffset=0,placesLimit=PLACES_PER_ROUND;
     if(allPlaces.length>PLACES_PER_ROUND){
-      var placesOffset=progress?progress.places||0:0;
-      callBody.places=allPlaces.slice(placesOffset,placesOffset+PLACES_PER_ROUND);
+      placesOffset=progress?progress.places||0:0;
+      callBody.places=allPlaces.slice(placesOffset,placesOffset+placesLimit);
       callBody.placesOffset=placesOffset;
+    }
+    // The per-round caps above are item counts, but one Polarsteps stop can contain a long
+    // story. Keep the actual JSON request below TREK's plugin-route limit by shrinking any
+    // active window before invoking the route.
+    while(JSON.stringify(callBody).length>IMPORT_MAX_JSON_BYTES){
+      var shrunk=false;
+      if(callBody.polarsteps&&callBody.polarsteps.steps&&callBody.polarsteps.steps.length>1){
+        stepLimit=Math.max(1,Math.floor(callBody.polarsteps.steps.length/2));
+        callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:allSteps.slice(stepOffset,stepOffset+stepLimit),_stepOffset:stepOffset,_totalSteps:allSteps.length});
+        shrunk=true;
+      }else if(callBody.bookings&&callBody.bookings.length>1){
+        bookingsLimit=Math.max(1,Math.floor(callBody.bookings.length/2));
+        callBody.bookings=allBookings.slice(bookingsOffset,bookingsOffset+bookingsLimit);
+        shrunk=true;
+      }else if(callBody.expenses&&callBody.expenses.length>1){
+        expensesLimit=Math.max(1,Math.floor(callBody.expenses.length/2));
+        callBody.expenses=allExpenses.slice(expensesOffset,expensesOffset+expensesLimit);
+        shrunk=true;
+      }else if(callBody.places&&callBody.places.length>1){
+        placesLimit=Math.max(1,Math.floor(callBody.places.length/2));
+        callBody.places=allPlaces.slice(placesOffset,placesOffset+placesLimit);
+        shrunk=true;
+      }
+      if(!shrunk)break;
     }
     result=await invoke('/import','POST',callBody);
 
@@ -2875,6 +2909,7 @@ async function doAIAssist(){
 
 function resetAll(){
   files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  previewOpenSources={};
   tripTargets=[];journeyTargets=[];extraTargets=[];unassigned=null;extraTargetSeq=0;
   window._lastImportBatches=[];
   document.getElementById('prog-content').innerHTML='';

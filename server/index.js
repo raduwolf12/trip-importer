@@ -91,6 +91,27 @@ function mapPolarstepsSteps(steps, startIndex) {
   })
 }
 
+function mapPolarstepsWeather(condition) {
+  const c = String(condition || '').toLowerCase()
+  if (!c) return null
+  if (c.includes('thunder') || c.includes('storm')) return 'stormy'
+  if (c.includes('rain') || c.includes('drizzle') || c.includes('sleet')) return 'rainy'
+  if (c.includes('snow') || c.includes('hail')) return 'cold'
+  if (c.includes('partly') || c.includes('mostly') || c.includes('few-clouds')) return 'partly'
+  if (c.includes('cloud') || c.includes('fog') || c.includes('overcast')) return 'cloudy'
+  if (c.includes('clear') || c.includes('sun')) return 'sunny'
+  return null
+}
+
+function mapPolarstepsEntryLocation(step, fallbackName) {
+  if (!step?.location || typeof step.location.lat !== 'number' || typeof step.location.lon !== 'number') return {}
+  return {
+    location_name: step.location.name || fallbackName || step.name || null,
+    location_lat: step.location.lat,
+    location_lng: step.location.lon,
+  }
+}
+
 // Normalize a loose date string (various separators/field orders, as found in expense CSVs)
 // to YYYY-MM-DD, or null if it can't be parsed. Mirrors the disambiguation already used for
 // booking-text date extraction below: a 4-digit first field is YYYY-MM-DD; a 4-digit last
@@ -971,6 +992,7 @@ module.exports = definePlugin({
                     const introRes = await ctx.journal.createEntry(journeyId, {
                       entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
                       title: 'Trip overview',
+                      story: polarsteps.summary,
                       content: polarsteps.summary,
                     })
                     p.journalEntries++
@@ -994,8 +1016,12 @@ module.exports = definePlugin({
                     ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
                     : ''
                   const entryDate = step.date || polarsteps.startDate
+                  const entryWeather = mapPolarstepsWeather(step.weather?.condition)
+                  const entryLocation = mapPolarstepsEntryLocation(step)
                   const entryRes = await ctx.journal.createEntry(journeyId, {
-                    entry_date: entryDate, title: step.name, content: (step.description || '') + weatherNote,
+                    entry_date: entryDate, title: step.name, story: (step.description || '') + weatherNote, content: (step.description || '') + weatherNote,
+                    weather: entryWeather,
+                    ...entryLocation,
                   })
                   p.journalEntries++
                   const entryId = entryRes?.id ?? entryRes?.data?.id
@@ -1226,6 +1252,7 @@ module.exports = definePlugin({
                     const introRes = await ctx.journal.createEntry(journeyId, {
                       entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
                       title: 'Trip overview',
+                      story: polarsteps.summary,
                       content: polarsteps.summary,
                     })
                     p.journalEntries++
@@ -1275,8 +1302,10 @@ module.exports = definePlugin({
                       : ''
                     const entryDate = step.date || polarsteps.startDate
                     const entryContent = (step.description || '') + weatherNote
+                    const entryWeather = mapPolarstepsWeather(step.weather?.condition)
+                    const entryLocation = mapPolarstepsEntryLocation(step, placeName)
 
-                    const entry = { entry_date: entryDate, title: step.name, content: entryContent }
+                    const entry = { entry_date: entryDate, title: step.name, story: entryContent, content: entryContent, weather: entryWeather, ...entryLocation }
                     if (placeId) entry.place_id = placeId
                     const entryRes = await ctx.journal.createEntry(journeyId, entry)
                     p.journalEntries++
