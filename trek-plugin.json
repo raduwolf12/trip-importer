@@ -1,7 +1,7 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "apiVersion": 1,
   "type": "page",
   "trek": ">=3.4.0 <4.0.0",
@@ -26,14 +26,26 @@
     "db:write:daynotes",
     "db:read:daynotes",
     "db:meta",
+    "db:read:collections",
+    "db:write:collections",
     "ai:invoke",
     "hook:photo-provider",
     "http:outbound:nominatim.openstreetmap.org",
-    "http:outbound:polarsteps.s3.amazonaws.com"
+    "http:outbound:polarsteps.s3.amazonaws.com",
+    "http:outbound:www.google.com",
+    "http:outbound:maps.app.goo.gl",
+    "http:outbound:goo.gl",
+    "http:outbound:naver.me",
+    "http:outbound:pages.map.naver.com"
   ],
   "egress": [
     "nominatim.openstreetmap.org",
-    "polarsteps.s3.amazonaws.com"
+    "polarsteps.s3.amazonaws.com",
+    "www.google.com",
+    "maps.app.goo.gl",
+    "goo.gl",
+    "naver.me",
+    "pages.map.naver.com"
   ],
   "settings": [
     {

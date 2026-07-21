@@ -6,7 +6,15 @@ function safeJson(status, obj) {
   catch (e) { return { status: 500, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ error: String(e) }) } }
 }
 async function tryAttempt(fn) {
-  try { return await fn() } catch (e) { return { error: e?.message || String(e) } }
+  try { return await fn() } catch (e) {
+    // Node's undici wraps every low-level fetch failure (DNS, connection refused, TLS, blocked
+    // egress) in a generic top-level "fetch failed" — the actual reason lives in e.cause and was
+    // getting silently dropped, making a real failure (e.g. an egress host not yet granted after
+    // a permissions bump) indistinguishable from any other fetch problem in the client-visible error.
+    let msg = e?.message || String(e)
+    if (e?.cause?.message) msg += ' (' + e.cause.message + ')'
+    return { error: msg }
+  }
 }
 // For optional/best-effort ctx calls (meta, trips.update cover_image, …) that must never break
 // the surrounding import — swallows both a thrown rejection and the synchronous property-access
@@ -161,6 +169,71 @@ async function reverseGeocode(lat, lng) {
       [a.neighbourhood || a.suburb || a.quarter, a.city || a.town || a.village || a.county]
         .filter(Boolean).join(', ') || data.display_name?.split(',').slice(0, 2).join(', ') || null
   } catch (_e) { return null }
+}
+
+// ── Follow redirects for a short link, stopping as soon as a wanted pattern shows up ──────────
+// Confirmed against a real instance: a maps.app.goo.gl share-list link's redirect chain is
+// maps.app.goo.gl -> www.google.com/maps/@/data=...!2s<listId>...  -> consent.google.com/ml?... (a
+// GDPR interstitial this plugin's egress allowlist correctly refuses to fetch — and shouldn't need
+// to). The critical realization: the list ID substring (`!2s<id>`) is already present in the
+// SECOND url — the Location header of the FIRST redirect — before we ever fetch it. So this
+// resolver checks `matchFn` against the redirect TARGET (from the Location header) before
+// deciding whether to fetch it at all, and returns as soon as it matches. It only ever fetches a
+// hop when the pattern hasn't been found yet and there's still chain left to follow — meaning a
+// consent-wall hop the pattern already matched before is never actually requested. If the pattern
+// truly isn't found before the chain runs into a host outside this plugin's egress list, that
+// fetch throws (surfaced to the caller as a normal error, now with the real host name via
+// tryAttempt's e.cause handling) rather than silently stalling.
+async function resolveRedirectChain(url, matchFn, timeoutMs) {
+  let current = url
+  if (matchFn(current)) return current
+  for (let hop = 0; hop < 5; hop++) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs || 10000)
+    let res
+    try {
+      res = await fetch(current, { redirect: 'manual', signal: controller.signal })
+    } finally { clearTimeout(timeout) }
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location')
+      if (!loc) return current
+      current = new URL(loc, current).toString()
+      if (matchFn(current)) return current
+      continue
+    }
+    return current
+  }
+  return current
+}
+
+// ── Google Maps internal feature-id encoding ──────────────────────────────────
+// Ported verbatim (logic, not code) from TREK core's own List Import feature
+// (server/src/services/placeService.ts, importGoogleList(), liketrek/TREK, AGPL-3.0) so places
+// imported via /parse-google-list carry the same google_ftid shape TREK's native import produces.
+function googleMapsHexId(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const raw = String(value).trim()
+  if (/^0x[0-9a-f]+$/i.test(raw)) return raw.toLowerCase()
+  if (!/^-?\d+$/.test(raw)) return null
+  try {
+    const parsed = BigInt(raw)
+    const unsigned = parsed < 0n ? (1n << 64n) + parsed : parsed
+    return '0x' + unsigned.toString(16)
+  } catch (_e) { return null }
+}
+function googleMapsFeatureIdFromItem(item) {
+  if (!Array.isArray(item)) return null
+  const candidates = [
+    Array.isArray(item[1]) ? item[1][6] : null,
+    Array.isArray(item[7]) ? item[7][1] : null,
+  ]
+  for (const ids of candidates) {
+    if (!Array.isArray(ids) || ids.length < 2) continue
+    const first = googleMapsHexId(ids[0])
+    const second = googleMapsHexId(ids[1])
+    if (first && second) return first + ':' + second
+  }
+  return null
 }
 
 // ── Distance between two coords in metres ────────────────────────────────────
@@ -651,7 +724,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.0.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.0 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -896,6 +969,374 @@ module.exports = definePlugin({
           const clean = points.filter(p => typeof p?.lat === 'number' && typeof p?.lng === 'number' && !isNaN(p.lat) && !isNaN(p.lng))
           const clusters = clusterByProximity(clean, 500)
           return { places: clusters.slice(0, 300), totalPoints: clean.length }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Parse Google Maps Takeout "Saved Places" export ───────────────────────
+    // Google's Takeout export for starred/saved places is a GeoJSON FeatureCollection, but the
+    // exact `properties` field names have varied across export versions — at least two variants
+    // are known: lowercase `properties.location.{name,address,geo_coordinates}` and a
+    // capitalized `properties.Location["Business Name"/"Address"/"Geo Coordinates"]`. This is
+    // UNCONFIRMED against a real current export (no sample was available to verify against, only
+    // a live Google Maps share link, which isn't the same thing as a Takeout file) — built from
+    // general knowledge of the format, trying several known property paths and falling back
+    // gracefully rather than assuming one exact shape holds. `geometry.coordinates` (plain
+    // GeoJSON `[lng,lat]`) is tried first for coordinates, since it's the most likely field to
+    // stay stable regardless of which `properties` variant a given export uses.
+    //
+    // Unlike GPS-photo/timeline points, every entry here already carries its own distinct
+    // name — so these are NOT proximity-clustered like clusterByProximity() does for anonymous
+    // GPS pings; clustering would wrongly merge two differently-named saved places that happen
+    // to sit near each other (e.g. two restaurants on the same block).
+    {
+      method: 'POST', path: '/parse-google-places', auth: true,
+      async handler(req, ctx) {
+        const raw = req.body?.json
+        if (!raw) return safeJson(200, { places: [] })
+        const result = await tryAttempt(async () => {
+          const data = typeof raw === 'string' ? JSON.parse(raw) : raw
+          const features = Array.isArray(data?.features) ? data.features : []
+          const places = []
+          for (const f of features) {
+            const props = f?.properties || {}
+            const loc = props.location || props.Location || {}
+            let lat = null, lng = null
+            if (Array.isArray(f?.geometry?.coordinates) && f.geometry.coordinates.length >= 2) {
+              lng = Number(f.geometry.coordinates[0]); lat = Number(f.geometry.coordinates[1])
+            } else {
+              const geo = loc.geo_coordinates || loc['Geo Coordinates'] || {}
+              lat = Number(geo.latitude ?? geo.Latitude)
+              lng = Number(geo.longitude ?? geo.Longitude)
+            }
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+            const name = loc.name || loc['Business Name'] || props.name || props.Title || props.title || null
+            const address = loc.address || loc.Address || null
+            const rawDate = props.date || props.Date || props.Published || props.published || null
+            const date = rawDate ? String(rawDate).slice(0, 10) : null
+            places.push({
+              name: name || address || 'Saved place',
+              lat, lng,
+              address: address || null,
+              date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null,
+            })
+            if (places.length >= 1000) break
+          }
+          return { places, totalFeatures: features.length }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Parse a generic place-list CSV ────────────────────────────────────────
+    // Distinct from /parse-csv (expenses) — fuzzy-matches name/lat/lng/address/notes columns
+    // instead of amount/category ones. A row with no recognizable lat/lng is skipped, since a
+    // place with no coordinates can't be saved into a collection.
+    {
+      method: 'POST', path: '/parse-places-csv', auth: true,
+      async handler(req, ctx) {
+        const text = req.body?.text
+        if (!text) return safeJson(200, { places: [] })
+        const result = await tryAttempt(async () => {
+          function parseCSVLine(line) {
+            const r = []; let cur = '', inQ = false
+            for (const c of line) {
+              if (c === '"') inQ = !inQ
+              else if ((c === ',' || c === ';' || c === '\t') && !inQ) { r.push(cur.trim()); cur = '' }
+              else cur += c
+            }
+            r.push(cur.trim()); return r
+          }
+          const lines = text.trim().split('\n').filter(l => l.trim())
+          if (lines.length < 2) return { places: [], error: 'Need header + data rows' }
+          const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
+          const findCol = (...ns) => ns.map(n => headers.indexOf(n)).find(i => i >= 0) ?? -1
+          const nameCol = findCol('name', 'title', 'place', 'placename')
+          const latCol = findCol('lat', 'latitude', 'y')
+          const lngCol = findCol('lng', 'lon', 'long', 'longitude', 'x')
+          const addressCol = findCol('address', 'addr', 'location', 'formattedaddress')
+          const notesCol = findCol('notes', 'note', 'comment', 'comments', 'description', 'desc')
+          const dateCol = findCol('date', 'saved', 'savedon', 'added', 'addedon', 'created')
+
+          const places = []
+          for (let i = 1; i < lines.length; i++) {
+            const cols = parseCSVLine(lines[i])
+            if (!cols.length || cols.every(c => !c)) continue
+            const lat = latCol >= 0 ? Number(cols[latCol]) : NaN
+            const lng = lngCol >= 0 ? Number(cols[lngCol]) : NaN
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
+            const name = nameCol >= 0 ? cols[nameCol] || null : null
+            places.push({
+              name: name || 'Place ' + i,
+              lat, lng,
+              address: addressCol >= 0 ? cols[addressCol] || null : null,
+              notes: notesCol >= 0 ? cols[notesCol] || null : null,
+              date: dateCol >= 0 ? normalizeDateStr(cols[dateCol]) : null,
+            })
+            if (places.length >= 1000) break
+          }
+          return { places, rowCount: places.length }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Import a shared Google Maps list link ─────────────────────────────────
+    // This exists because TREK's own core app already has a "List Import" feature (Google List /
+    // Naver List) that does exactly this against a trip — confirmed by reading the real source
+    // (server/src/services/placeService.ts, liketrek/TREK, AGPL-3.0). A plain fetch of the
+    // interactive maps.google.com page hits a GDPR consent interstitial (consent.google.com) that
+    // a plugin has no way to click through — but TREK's own feature doesn't click through it
+    // either: it only follows the short-link redirect far enough to pull a list ID out of the
+    // resulting URL string (which survives intact even inside consent.google.com's own
+    // `continue=` param, since `!` isn't URL-escaped), then hits a completely separate,
+    // unauthenticated internal Google Maps AJAX endpoint (`maps/preview/entitylist/getlist` — the
+    // same call Maps' own web frontend makes to populate a list side panel) that isn't part of
+    // the consent-gated page-view flow at all. `gl=us` on THAT endpoint (not the redirect) is what
+    // avoids the EU consent gate. This is an undocumented, unofficial Google endpoint with no
+    // stability guarantee — same caveat TREK's own core code carries.
+    {
+      method: 'POST', path: '/parse-google-list', auth: true,
+      async handler(req, ctx) {
+        const url = req.body?.url
+        const result = await tryAttempt(async () => {
+          if (!url || typeof url !== 'string') throw new Error('No link provided')
+          const extractListId = (u) => {
+            const plMatch = u.match(/placelists\/list\/([A-Za-z0-9_-]+)/)
+            if (plMatch) return plMatch[1]
+            const dataMatch = u.match(/!2s([A-Za-z0-9_-]{15,})/)
+            if (dataMatch) return dataMatch[1]
+            return null
+          }
+          let resolvedUrl = url
+          let listId = extractListId(url)
+          if (!listId && /goo\.gl|maps\.app/i.test(url)) {
+            // Stops at the first URL in the redirect chain containing the list ID — which is the
+            // FIRST redirect target here, well before the chain ever reaches consent.google.com
+            // (an interstitial this plugin's egress allowlist correctly won't fetch, and doesn't
+            // need to: the ID is already present one hop earlier). See resolveRedirectChain().
+            resolvedUrl = await resolveRedirectChain(url, (u) => !!extractListId(u), 10000)
+            listId = extractListId(resolvedUrl)
+          }
+          if (!listId) {
+            if (resolvedUrl.includes('/maps/place/')) {
+              throw new Error('That link points to a single place, not a list — paste a "Share list" link instead')
+            }
+            throw new Error('Could not find a list in that link — make sure it\'s a shared Google Maps list ("Share list")')
+          }
+          const apiUrl = `https://www.google.com/maps/preview/entitylist/getlist?authuser=0&hl=en&gl=us&pb=!1m1!1s${encodeURIComponent(listId)}!2e2!3e2!4i500!16b1`
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 15000)
+          let apiRes
+          try {
+            apiRes = await fetch(apiUrl, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+              signal: controller.signal,
+            })
+          } finally { clearTimeout(timeout) }
+          if (!apiRes.ok) throw new Error('Google Maps did not return list data (the list may be private, or the link expired)')
+          const rawText = await apiRes.text()
+          const jsonStr = rawText.substring(rawText.indexOf('\n') + 1)
+          let listData
+          try { listData = JSON.parse(jsonStr) } catch (_e) { throw new Error('Could not parse the response from Google Maps') }
+          const meta = listData && listData[0]
+          if (!meta) throw new Error('Invalid list data received from Google Maps')
+          const listName = meta[4] || 'Google Maps List'
+          const items = meta[8]
+          if (!Array.isArray(items) || !items.length) throw new Error('That list is empty or could not be read')
+          const places = []
+          for (const item of items) {
+            const coords = item && item[1] && item[1][5]
+            const lat = coords && coords[2]
+            const lng = coords && coords[3]
+            const name = item && item[2]
+            const notes = (item && item[3]) || null
+            if (name && typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+              places.push({ name, lat, lng, notes, googleFtid: googleMapsFeatureIdFromItem(item) })
+            }
+          }
+          if (!places.length) throw new Error('No places with coordinates found in that list')
+          return { places, listName }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Import a shared Naver Maps list link ───────────────────────────────────
+    // Same technique as /parse-google-list, ported from TREK core's importNaverList(): resolve a
+    // naver.me short link, pull the folder ID out of the resolved URL, then page through Naver's
+    // own internal bookmarks-share JSON API — a normal, documented-shape JSON API (item.py/item.px
+    // for lat/lng, Naver's own y/x-order field names), no consent wall, no array-index walk needed.
+    {
+      method: 'POST', path: '/parse-naver-list', auth: true,
+      async handler(req, ctx) {
+        const url = req.body?.url
+        const result = await tryAttempt(async () => {
+          if (!url || typeof url !== 'string') throw new Error('No link provided')
+          const extractFolderId = (u) => {
+            const m = u.match(/favorite\/myPlace\/folder\/([A-Za-z0-9_-]+)/i)
+            return m ? m[1] : null
+          }
+          let resolvedUrl = url
+          let parsedUrl
+          try { parsedUrl = new URL(url) } catch (_e) { throw new Error('Invalid URL') }
+          if (parsedUrl.hostname === 'naver.me' && !extractFolderId(url)) {
+            resolvedUrl = await resolveRedirectChain(url, (u) => !!extractFolderId(u), 10000)
+          }
+          const folderMatch = resolvedUrl.match(/favorite\/myPlace\/folder\/([A-Za-z0-9_-]+)/i)
+          const folderId = folderMatch && folderMatch[1]
+          if (!folderId) throw new Error('Could not find a shared list folder in that link — make sure it\'s a shared Naver Maps list')
+
+          const limit = 20
+          async function fetchPage(start) {
+            const apiUrl = `https://pages.map.naver.com/save-pages/api/maps-bookmark/v3/shares/${encodeURIComponent(folderId)}/bookmarks?placeInfo=true&start=${start}&limit=${limit}&sort=lastUseTime&mcids=ALL&createIdNo=true`
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 15000)
+            try {
+              const res = await fetch(apiUrl, {
+                headers: {
+                  Accept: 'application/json',
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                },
+                signal: controller.signal,
+              })
+              if (!res.ok) throw new Error('Failed to fetch list from Naver Maps')
+              return await res.json()
+            } finally { clearTimeout(timeout) }
+          }
+
+          const firstPage = await fetchPage(0)
+          const listName = firstPage?.folder?.name || 'Naver Maps List'
+          const totalCount = typeof firstPage?.folder?.bookmarkCount === 'number' ? firstPage.folder.bookmarkCount : (firstPage?.bookmarkList || []).length
+          const allItems = (firstPage?.bookmarkList || []).slice()
+          // Capped at 500 to bound worst-case round-trips within this route's own time budget.
+          for (let start = limit; start < Math.min(totalCount, 500); start += limit) {
+            const page = await fetchPage(start)
+            const pageItems = page?.bookmarkList || []
+            if (!pageItems.length) break
+            allItems.push(...pageItems)
+          }
+          if (!allItems.length) throw new Error('That list is empty or could not be read')
+
+          const places = []
+          for (const item of allItems) {
+            const lat = Number(item?.py)
+            const lng = Number(item?.px)
+            const name = (typeof item?.name === 'string' && item.name.trim()) || (typeof item?.displayName === 'string' && item.displayName.trim()) || ''
+            const notes = (typeof item?.memo === 'string' && item.memo.trim()) || null
+            const address = (typeof item?.address === 'string' && item.address.trim()) || null
+            if (name && Number.isFinite(lat) && Number.isFinite(lng)) places.push({ name, lat, lng, notes, address })
+          }
+          if (!places.length) throw new Error('No places with coordinates found in that list')
+          return { places, listName }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── List the user's existing Collections (saved-place lists) ─────────────
+    // For the "add to an existing collection" choice, mirroring /trips for the trip-import flow.
+    {
+      method: 'GET', path: '/collections', auth: true,
+      async handler(req, ctx) {
+        const result = await tryAttempt(async () => {
+          const data = await ctx.collections.listMine()
+          const arr = Array.isArray(data) ? data : (data?.collections || [])
+          return { collections: arr.map(c => ({ id: c.id, name: c.name, placeCount: c.place_count })).filter(c => c.id) }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Import parsed places into a Collection ────────────────────────────────
+    // A Collection (ctx.collections.*) is a user-owned saved-place list, entirely independent
+    // of any trip — no dates, no days, no itinerary, so this is a much simpler resumable import
+    // than /import: create-or-use a collection, then ctx.collections.savePlace() once per place.
+    // Same index-resumable shape as /import (progress carries the next index + running totals),
+    // since a large saved-places export can just as easily need multiple rounds to fit the
+    // ~8s bridge budget and/or the ~100KB body-size ceiling (see /import's own notes on both).
+    {
+      method: 'POST', path: '/import-collection', auth: true,
+      async handler(req, ctx) {
+        const { collectionConfig, places, placesOffset, totalPlaces, progress: progressIn } = req.body || {}
+        const result = await tryAttempt(async () => {
+          const log = []; const errors = []
+          const deadline = Date.now() + 6000
+          const withinBudget = () => Date.now() < deadline
+
+          const p = Object.assign({
+            collectionId: null, places: 0, placesSaved: 0, placesDuplicate: 0,
+            createdRefs: [],
+          }, progressIn || {})
+
+          let collectionId = p.collectionId
+          if (!collectionId) {
+            if (collectionConfig?.mode === 'existing') {
+              collectionId = Number(collectionConfig.collectionId)
+            } else {
+              const created = await ctx.collections.create({ name: collectionConfig?.name || 'Imported places' })
+              collectionId = created?.id ?? created?.data?.id
+              if (!collectionId) throw new Error('Failed to create collection')
+              log.push({ type: 'collection', message: 'Created collection: ' + (collectionConfig?.name || 'Imported places') })
+            }
+            p.collectionId = collectionId
+          }
+
+          const placesArr = Array.isArray(places) ? places : []
+          // Same offset/total pagination pattern as /import's steps/bookings/expenses/places —
+          // a large saved-places export is windowed by the client, this just re-bases the
+          // received slice back onto the correct global index.
+          const offset = placesOffset || 0
+          const total = totalPlaces ?? (offset + placesArr.length)
+
+          if (p.places < total) {
+            let i = p.places
+            for (; i < offset + placesArr.length; i++) {
+              if (!withinBudget()) break
+              const place = placesArr[i - offset]
+              try {
+                let name = place.name || null
+                // A generic fallback name (from the parser, when the source had none) is worth
+                // trying to improve via reverse geocoding, same as trip GPS/timeline places do —
+                // but a Google-Maps-saved-place or CSV row usually already has a real name, so
+                // this only fires for the genuinely nameless case.
+                if ((!name || /^(Saved place|Place \d+)$/.test(name)) && withinBudget()) {
+                  try {
+                    const geocoded = await reverseGeocode(place.lat, place.lng)
+                    if (geocoded) name = geocoded
+                    await sleep(1100) // Nominatim rate limit
+                  } catch (_e) {}
+                }
+                name = name || 'Saved place'
+                const saveRes = await ctx.collections.savePlace({
+                  collection_id: collectionId,
+                  name,
+                  lat: place.lat,
+                  lng: place.lng,
+                  address: place.address || null,
+                  notes: place.notes || null,
+                  google_ftid: place.googleFtid || undefined,
+                })
+                if (saveRes?.duplicate) {
+                  p.placesDuplicate++
+                } else {
+                  p.placesSaved++
+                  const placeId = saveRes?.place?.id ?? saveRes?.id
+                  if (placeId) p.createdRefs.push({ type: 'collectionPlace', id: placeId })
+                }
+                await sleep(80)
+              } catch (e) { errors.push('Place ' + (place.name || '') + ': ' + e.message) }
+            }
+            p.places = i
+          }
+          let msg = 'Saved ' + p.placesSaved + ' place' + (p.placesSaved === 1 ? '' : 's') + ' to the collection'
+          if (p.placesDuplicate) msg += ' (' + p.placesDuplicate + ' already saved, skipped)'
+          if (p.places < total) msg += ' (' + (total - p.places) + ' more queued)'
+          log.push({ type: 'places', message: msg })
+
+          p.done = p.places >= total
+          return { ok: true, collectionId, log, errors, progress: p }
         })
         return safeJson(200, result)
       },
@@ -1660,6 +2101,10 @@ module.exports = definePlugin({
               else if (r.type === 'daynote') await ctx.daynotes.delete(tripId, r.id)
               else if (r.type === 'journalEntry') await ctx.journal.deleteEntry(r.id)
               else if (r.type === 'journey') await ctx.journal.deleteJourney(r.id)
+              // Not trip-scoped (a collection isn't a trip) — like journey/journalEntry above,
+              // no tripId needed. The collection itself is never deleted, same as trips/journeys
+              // are never deleted by undo — only what was added to it.
+              else if (r.type === 'collectionPlace') await ctx.collections.deletePlace(r.id)
               deleted++
             } catch (e) { errors.push((r.type || 'item') + ' ' + r.id + ': ' + e.message) }
           }

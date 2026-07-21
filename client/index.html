@@ -814,6 +814,17 @@ select.field-input{cursor:pointer;}
 
 <!-- Step 1: Upload -->
 <div id="step-1">
+  <!-- Import target: a Trip (the full existing flow) or a Collection (a user-owned saved-place
+       list — ctx.collections.*, entirely independent of any trip: no dates/days/itinerary). The
+       two modes share this same 4-step shell but otherwise run almost entirely separate code
+       paths (doAnalyzeCollection()/renderCollectionPreview()/prepareCollectionStep3()/
+       doImportCollection()), gated behind setImportMode() below, specifically so the existing
+       Trip flow's functions stay untouched rather than growing conditional branches throughout. -->
+  <div class="trip-mode-row" style="margin-bottom:14px;">
+    <button class="tmode-btn active" id="im-trip" onclick="setImportMode('trip')">Import into a Trip</button>
+    <button class="tmode-btn" id="im-collection" onclick="setImportMode('collection')">Import into a Collection</button>
+  </div>
+  <div id="collection-mode-hint" style="display:none;font-size:11px;color:var(--text-faint);margin:-8px 0 14px;">Saves places into one of your Collections (a saved-place list, independent of any trip) — no trip, no dates, no days. Good for a Google Maps saved-places export, a KML custom map, or a plain CSV place list.</div>
   <div class="drop-zone" id="dz">
     <div style="margin-bottom:10px;color:var(--text-muted);">
       <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
@@ -829,6 +840,15 @@ select.field-input{cursor:pointer;}
     </div>
   </div>
   <input type="file" id="fi" multiple accept=".zip,.json,.pdf,.txt,.eml,.jpg,.jpeg,.png,.csv,.tsv,.xlsx,.gpx,.kml,.kmz,.ics" style="display:none"/>
+  <!-- Collection mode only: a shared Google Maps or Naver Maps list link, resolved server-side
+       (see /parse-google-list, /parse-naver-list) instead of requiring a file export at all. -->
+  <div id="collection-link-row" style="display:none;margin-top:14px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Or paste a shared Google Maps or Naver Maps list link:</div>
+    <div style="display:flex;gap:8px;">
+      <input type="text" id="collection-link-input" placeholder="https://maps.app.goo.gl/… or https://naver.me/…" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-elevated);color:var(--text-primary);font-size:13px;"/>
+      <button class="btn-s" id="collection-link-btn" onclick="doImportListLink()">Fetch list</button>
+    </div>
+  </div>
   <div id="st1-status" class="st" style="display:none;"></div>
   <div class="btn-row">
     <button class="btn-p" id="analyze-btn" onclick="doAnalyze()">
@@ -843,6 +863,7 @@ select.field-input{cursor:pointer;}
 <!-- Step 2: Preview -->
 <div id="step-2" style="display:none;">
   <div class="sources-grid" id="sources-grid"></div>
+  <div id="collection-preview" style="display:none;"></div>
   <div class="btn-row">
     <button class="btn-s" onclick="goStep(1)">Back</button>
     <button class="btn-p" id="step2-next" onclick="goStep(3)">Continue</button>
@@ -851,6 +872,25 @@ select.field-input{cursor:pointer;}
 
 <!-- Step 3: Configure -->
 <div id="step-3" style="display:none;">
+  <!-- Collection mode's own, much simpler config — no trip/days/journal/bookings/costs at all. -->
+  <div id="collection-config" style="display:none;margin-bottom:16px;">
+    <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">Collection</div>
+    <div class="trip-mode-row">
+      <button class="tmode-btn active" id="cm-new" onclick="setCollectionMode('new')">Create new collection</button>
+      <button class="tmode-btn" id="cm-existing" onclick="setCollectionMode('existing')">Add to existing</button>
+    </div>
+    <div id="new-collection-fields">
+      <div class="field-wrap"><label>Collection name</label><input class="field-input" id="collection-name" placeholder="e.g. Tokyo eats"/></div>
+    </div>
+    <div id="existing-collection-fields" style="display:none;">
+      <div class="field-wrap"><label>Select collection</label>
+        <select class="field-input" id="collection-select" data-trek-native><option value="">— select —</option></select>
+      </div>
+    </div>
+  </div>
+  <!-- Everything below is trip-mode only — toggled as one unit by setImportMode(), since
+       none of it applies to a Collection import (no trip, no dates, no days, no bookings). -->
+  <div id="trip-step3-fields">
   <!-- Trip (single target — 0 or 1 journey selected, no leftover) -->
   <div id="single-trip-config" style="margin-bottom:16px;">
     <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">Trip</div>
@@ -933,6 +973,7 @@ select.field-input{cursor:pointer;}
       <option value="CAD">CAD — Canadian Dollar</option>
     </select>
   </div>
+  </div>
   <div class="btn-row">
     <button class="btn-s" onclick="goStep(2)">Back</button>
     <button class="btn-p" id="import-btn" onclick="doImport()">Import everything</button>
@@ -987,6 +1028,32 @@ var previewOpenSources={};
 var tripMode='new';
 var tripTargets=[]; // computeTripTargets() result — the source of truth once step 3 is entered
 
+// Collection mode: a completely separate, much simpler target than a trip (ctx.collections.*
+// places have no dates/days/itinerary at all) — kept in its own state rather than folded into
+// `parsed`/`tripTargets`, since almost nothing about the trip flow's shape actually applies.
+var importMode='trip';
+var parsedCollection={places:[]}; // {name,lat,lng,address,notes,date,_selected,_source}[]
+var collectionMode='new'; // 'new' | 'existing'
+var existingCollections=[];
+
+function setImportMode(mode){
+  importMode=mode;
+  document.getElementById('im-trip').className='tmode-btn'+(mode==='trip'?' active':'');
+  document.getElementById('im-collection').className='tmode-btn'+(mode==='collection'?' active':'');
+  document.getElementById('collection-mode-hint').style.display=mode==='collection'?'':'none';
+  document.getElementById('collection-link-row').style.display=mode==='collection'?'':'none';
+  document.getElementById('trip-step3-fields').style.display=mode==='collection'?'none':'';
+  document.getElementById('collection-config').style.display=mode==='collection'?'block':'none';
+}
+
+function setCollectionMode(mode){
+  collectionMode=mode;
+  document.getElementById('cm-new').className='tmode-btn'+(mode==='new'?' active':'');
+  document.getElementById('cm-existing').className='tmode-btn'+(mode==='existing'?' active':'');
+  document.getElementById('new-collection-fields').style.display=mode==='new'?'block':'none';
+  document.getElementById('existing-collection-fields').style.display=mode==='existing'?'block':'none';
+}
+
 // ── Steps ──────────────────────────────────────────────────────────────────
 function goStep(n){
   [1,2,3,4].forEach(function(i){document.getElementById('step-'+i).style.display=i===n?'block':'none';});
@@ -997,7 +1064,7 @@ function goStep(n){
     else document.getElementById('dc-'+i).textContent=i;
     if(i<4)document.getElementById('cn-'+i).className='sconn'+(i<n?' done':'');
   });
-  if(n===3)prepareStep3();
+  if(n===3){if(importMode==='collection')prepareCollectionStep3();else prepareStep3();}
   rh();
 }
 
@@ -1087,6 +1154,7 @@ async function parsePolarstepsSmart(text,filename,jsonWarnings){
 // ── Analyze files ──────────────────────────────────────────────────────────
 async function doAnalyze(){
   if(!files.length){showSt1('Please drop some files first.','e');return;}
+  if(importMode==='collection')return doAnalyzeCollection();
   var btn=document.getElementById('analyze-btn');btn.disabled=true;
   showSt1('Reading files…','');
   parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
@@ -1350,6 +1418,116 @@ async function doAnalyze(){
   goStep(2);
 }
 
+// Collection mode's own analyze pass — much simpler than doAnalyze(): every source here
+// (Google Maps saved-places JSON, KML/KMZ, place-list CSV) already produces the same flat
+// {name,lat,lng,...} shape, with no clustering (each entry already has its own distinct name —
+// see /parse-google-places' own comment for why merging nearby-but-differently-named places
+// would be wrong here) and no trip/date machinery at all.
+async function doAnalyzeCollection(){
+  var btn=document.getElementById('analyze-btn');btn.disabled=true;
+  showSt1('Reading files…','');
+  parsedCollection={places:[]};
+
+  var jsonFiles=[],kmlFiles=[],kmzFiles=[],csvFiles=[];
+  files.forEach(function(f){
+    var n=f.name.toLowerCase();
+    if(n.endsWith('.json'))jsonFiles.push(f);
+    else if(n.endsWith('.kml'))kmlFiles.push(f);
+    else if(n.endsWith('.kmz'))kmzFiles.push(f);
+    else if(n.endsWith('.csv')||n.endsWith('.tsv'))csvFiles.push(f);
+  });
+
+  var warnings=[];
+
+  for(var jf of jsonFiles){
+    try{
+      var text=await readText(jf);
+      var data;
+      try{data=JSON.parse(text);}catch(_pe){warnings.push(jf.name+': not valid JSON');continue;}
+      // Google Takeout's saved-places export is a GeoJSON FeatureCollection — this shape check
+      // is the one part of the format that's stable regardless of which property-naming
+      // variant a given export uses (see /parse-google-places' own comment on that).
+      if(data&&data.type==='FeatureCollection'&&Array.isArray(data.features)){
+        var gpResult=await invoke('/parse-google-places','POST',{json:text});
+        if(gpResult&&gpResult.places)gpResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'Google Maps'}));});
+        else if(gpResult&&gpResult.error)warnings.push(jf.name+': '+gpResult.error);
+      }else{
+        warnings.push(jf.name+": doesn't look like a Google Maps saved-places export (expected a GeoJSON FeatureCollection)");
+      }
+    }catch(e){warnings.push(jf.name+': '+e.message);}
+  }
+
+  for(var kmzf of kmzFiles){
+    try{
+      var kmzZip=await JSZip.loadAsync(kmzf);
+      var kmlEntry=null;
+      kmzZip.forEach(function(path,entry){if(!kmlEntry&&path.toLowerCase().endsWith('.kml'))kmlEntry=entry;});
+      if(kmlEntry)kmlFiles.push({_text:await kmlEntry.async('text'),name:kmzf.name});
+      else warnings.push(kmzf.name+': no .kml file found inside');
+    }catch(e){warnings.push(kmzf.name+': '+e.message);}
+  }
+  for(var kf of kmlFiles){
+    try{
+      var kmlText=kf._text||await readText(kf);
+      var kmlPts=parseKMLText(kmlText);
+      kmlPts.forEach(function(p){parsedCollection.places.push({name:p.name,lat:p.lat,lng:p.lng,address:null,notes:null,date:p.date,_selected:true,_source:'KML'});});
+      if(!kmlPts.length)warnings.push(kf.name+': no placemarks with coordinates found');
+    }catch(e){warnings.push(kf.name+': '+e.message);}
+  }
+
+  for(var cf of csvFiles){
+    try{
+      var csvText=await readText(cf);
+      var csvResult=await invoke('/parse-places-csv','POST',{text:csvText});
+      if(csvResult&&csvResult.places)csvResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'CSV'}));});
+      else if(csvResult&&csvResult.error)warnings.push(cf.name+': '+csvResult.error);
+    }catch(e){warnings.push(cf.name+': '+e.message);}
+  }
+
+  if(warnings.length)notifyUser(warnings.length+' file'+(warnings.length===1?'':'s')+" couldn't be read: "+warnings.join('; ').slice(0,180),'warning');
+
+  showSt1('','');
+  document.getElementById('st1-status').style.display='none';
+  btn.disabled=false;
+  renderCollectionPreview();
+  goStep(2);
+}
+
+// Fetches a shared Google Maps or Naver Maps list link server-side (/parse-google-list,
+// /parse-naver-list — see CLAUDE.md for how these avoid Google's consent wall) and appends the
+// result to parsedCollection.places, additively — this doesn't reset what doAnalyzeCollection()
+// already gathered from dropped files, so a user can combine a pasted link with an uploaded KML.
+async function doImportListLink(){
+  var input=document.getElementById('collection-link-input');
+  var url=(input.value||'').trim();
+  if(!url){notifyUser('Paste a shared Google Maps or Naver Maps list link first.','warning');return;}
+  var btn=document.getElementById('collection-link-btn');
+  var origText=btn.textContent;
+  btn.disabled=true;btn.textContent='Fetching…';
+  try{
+    var isNaver=/naver\.me|naver\.com/i.test(url);
+    var route=isNaver?'/parse-naver-list':'/parse-google-list';
+    var result=await invoke(route,'POST',{url:url});
+    if(result&&result.error){
+      notifyUser(result.error,'warning');
+    }else if(result&&result.places&&result.places.length){
+      var src=result.listName||(isNaver?'Naver Maps list':'Google Maps list');
+      result.places.forEach(function(p){
+        parsedCollection.places.push({name:p.name,lat:p.lat,lng:p.lng,address:p.address||null,notes:p.notes||null,date:null,googleFtid:p.googleFtid||null,_selected:true,_source:src});
+      });
+      input.value='';
+      notifyUser('Added '+result.places.length+' place'+(result.places.length===1?'':'s')+' from "'+src+'"','info');
+      renderCollectionPreview();
+      goStep(2);
+    }else{
+      notifyUser('No places found in that list.','warning');
+    }
+  }catch(e){
+    notifyUser('Could not fetch that list: '+e.message,'warning');
+  }
+  btn.disabled=false;btn.textContent=origText;
+}
+
 // ── Preview ────────────────────────────────────────────────────────────────
 function renderPreview(){
   var grid=document.getElementById('sources-grid');
@@ -1383,6 +1561,38 @@ function renderPreview(){
 
   var hasAny=parsed.polarstepsAll.length||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length||parsed.gpxPlaces.length||parsed.kmlPlaces.length;
   document.getElementById('step2-next').disabled=!hasAny;
+  document.getElementById('sources-grid').style.display='';
+  document.getElementById('collection-preview').style.display='none';
+  rh();
+}
+
+// One merged list — Google Maps/KML/CSV places all already carry their own distinct name,
+// so (unlike trip GPS/timeline places) there's no per-source clustering step to show separately.
+function renderCollectionPreview(){
+  var container=document.getElementById('collection-preview');
+  container.innerHTML='';
+  var header=document.createElement('div');
+  header.style.cssText='font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:4px;';
+  header.textContent=parsedCollection.places.length+' place'+(parsedCollection.places.length===1?'':'s')+' found';
+  container.appendChild(header);
+  var hint=document.createElement('div');
+  hint.style.cssText='font-size:11px;color:var(--text-faint);margin-bottom:8px;';
+  hint.textContent='Click a place to deselect it — deselected places are skipped on import.';
+  container.appendChild(hint);
+  var list=document.createElement('div');list.className='preview-list';
+  parsedCollection.places.slice(0,20).forEach(function(p){
+    var row=document.createElement('div');row.className='preview-item';row.style.cursor='pointer';
+    row.innerHTML='<span class="pi-name">'+escHtml(p.name)+'</span>'+
+      '<span class="pi-meta">'+escHtml(p._source||'')+(p.address?' · '+escHtml(p.address):'')+'</span>';
+    row.addEventListener('click',function(){p._selected=!p._selected;row.style.opacity=p._selected?'1':'0.4';});
+    row.style.opacity=p._selected?'1':'0.4';
+    list.appendChild(row);
+  });
+  if(parsedCollection.places.length>20){var more=document.createElement('div');more.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';more.textContent='…and '+(parsedCollection.places.length-20)+' more';list.appendChild(more);}
+  container.appendChild(list);
+  document.getElementById('sources-grid').style.display='none';
+  container.style.display='';
+  document.getElementById('step2-next').disabled=!parsedCollection.places.length;
   rh();
 }
 
@@ -1679,6 +1889,28 @@ function targetHasContent(t){
 }
 function unassignedHasContent(){
   return !!(unassigned&&(unassigned.bookings.length||unassigned.expenses.length||unassigned.gpsPlaces.length||unassigned.timelinePlaces.length||unassigned.imgFiles.length||Object.keys(unassigned.stepPhotosByStepId).length));
+}
+
+// ── Configure (Collection mode) ─────────────────────────────────────────────
+async function prepareCollectionStep3(){
+  try{
+    var data=await invoke('/collections','GET');
+    existingCollections=(data&&data.collections)||[];
+  }catch(_e){existingCollections=[];}
+  var sel=document.getElementById('collection-select');
+  sel.innerHTML='<option value="">— select —</option>';
+  existingCollections.forEach(function(c){
+    var o=document.createElement('option');o.value=c.id;o.textContent=c.name+(c.placeCount!=null?' ('+c.placeCount+' places)':'');sel.appendChild(o);
+  });
+  // Suggest a name from the dominant source (e.g. "Google Maps places") if nothing's typed yet.
+  var nameInput=document.getElementById('collection-name');
+  if(!nameInput.value&&parsedCollection.places.length){
+    var bySource={};
+    parsedCollection.places.forEach(function(p){bySource[p._source||'Places']=(bySource[p._source||'Places']||0)+1;});
+    var topSource=Object.keys(bySource).sort(function(a,b){return bySource[b]-bySource[a];})[0];
+    nameInput.value=topSource+' places';
+  }
+  rh();
 }
 
 // ── Configure ──────────────────────────────────────────────────────────────
@@ -2095,8 +2327,79 @@ function setTripMode(mode){
   rh();
 }
 
+// ── Import (Collection mode) ────────────────────────────────────────────────
+// Much simpler than the trip flow's doImport()/importOneTarget(): one resumable loop, one
+// progress item, no targets/days/journal/bookings/costs/photos at all — ctx.collections.savePlace()
+// is the only write this makes.
+async function doImportCollection(){
+  var selected=parsedCollection.places.filter(function(p){return p._selected;});
+  if(!selected.length){notifyUser('Nothing to import — no places selected.');return;}
+  if(collectionMode==='existing'&&!document.getElementById('collection-select').value){notifyUser('Please select a collection.');return;}
+
+  goStep(4);
+  var prog=document.getElementById('prog-content');
+  prog.innerHTML='';
+  document.getElementById('done-row').style.display='none';
+
+  var collectionConfig=collectionMode==='existing'?
+    {mode:'existing',collectionId:document.getElementById('collection-select').value}:
+    {mode:'new',name:document.getElementById('collection-name').value||'Imported places'};
+
+  var progList=document.createElement('div');progList.className='prog-list';prog.appendChild(progList);
+  var item=document.createElement('div');item.className='prog-item';item.id='pi-coll-places';
+  item.innerHTML='<div class="prog-icon" id="ic-coll-places">📍</div>'+
+    '<div><div class="prog-label">Saving places to the collection</div><div class="prog-sub" id="sub-coll-places">Waiting…</div></div>';
+  progList.appendChild(item);
+  rh();
+  setProgRunning('coll-places');
+
+  // Same windowed-pagination pattern as the trip flow's places/bookings/expenses (see /import's
+  // own notes on the confirmed ~100KB plugin-route body-size ceiling) — a large saved-places
+  // export is capped to PLACES_PER_ROUND per call rather than sent whole.
+  var PLACES_PER_ROUND=40;
+  var progress=undefined,result=null,round=0,allErrors=[];
+  do{
+    round++;
+    var callBody={collectionConfig:collectionConfig,progress:progress,totalPlaces:selected.length};
+    var offset=progress?progress.places||0:0;
+    callBody.places=selected.slice(offset,offset+PLACES_PER_ROUND);
+    callBody.placesOffset=offset;
+    result=await invoke('/import-collection','POST',callBody);
+    // Switch to 'existing' after the first round, same reason the trip flow does this for
+    // tripConfig — a NEW collection must only ever be created once, on round 1.
+    collectionConfig={mode:'existing',collectionId:result.collectionId};
+    progress=result.progress||{done:true};
+    if(result.errors&&result.errors.length)allErrors=allErrors.concat(result.errors);
+    (result.log||[]).forEach(function(l){
+      if(progress.done)setProgDone('coll-places',l.message);
+      else setProgUpdate('coll-places',l.message);
+    });
+    if(!progress.done)setProgUpdate('coll-places','Resuming — round '+(round+1)+'…');
+    rh();
+  }while(!progress.done&&round<200);
+  if(round>=200)allErrors.push('Import stopped after 200 rounds — please report this');
+
+  var importRefs=(progress&&progress.createdRefs)||[];
+
+  var banner=document.createElement('div');banner.className='result-banner';banner.style.marginTop='10px';
+  var logHtml=(result.log||[]).map(function(l){
+    return '<div class="result-item">'+(l.type==='collection'?'🗂️':'📍')+' '+escHtml(l.message)+'</div>';
+  }).join('');
+  banner.innerHTML='<div class="result-title"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg> Imported</div>'+
+    '<div class="result-items">'+logHtml+'</div>'+
+    (allErrors.length?'<div style="margin-top:8px;font-size:12px;color:var(--warning);">'+allErrors.length+' warning'+(allErrors.length===1?'':'s')+': '+allErrors.slice(0,2).map(function(e){return escHtml(e);}).join('; ')+'</div>':'');
+  prog.appendChild(banner);
+
+  window._lastImportBatches=[{tripId:null,refs:importRefs}];
+  document.getElementById('done-row').style.display='flex';
+  var undoBtn=document.getElementById('undo-import-btn');
+  if(undoBtn){undoBtn.style.display=importRefs.length?'':'none';undoBtn.disabled=false;undoBtn.textContent='Undo this import';}
+  rh();
+}
+
 // ── Import ─────────────────────────────────────────────────────────────────
 async function doImport(){
+  if(importMode==='collection')return doImportCollection();
   // Read this first — journal-only mode skips trip creation entirely, so none of the
   // trip-mode/existing-trip-selection plumbing below actually matters for it.
   var journalOnly=document.getElementById('opt-journal-only').checked;
@@ -2909,6 +3212,7 @@ async function doAIAssist(){
 
 function resetAll(){
   files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  parsedCollection={places:[]};
   previewOpenSources={};
   tripTargets=[];journeyTargets=[];extraTargets=[];unassigned=null;extraTargetSeq=0;
   window._lastImportBatches=[];

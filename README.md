@@ -6,6 +6,8 @@ Reconstructs a complete past trip from any combination of data sources — drop 
 
 Also supports **journal-only mode**: if you just want a travel story/journal from your Polarsteps data without engaging the full trip-planning machinery (no places, no calendar days, no bookings/costs), you can create a standalone journey with nothing else attached.
 
+And **Collection mode**: import places into one of your Collections (a saved-place list, independent of any trip) instead of a trip plan — from a Google Maps "Saved places" export, a KML/KMZ custom map, a plain CSV place list, or by just **pasting a shared Google Maps or Naver Maps list link** directly (no export file needed). Switch to it with the "Import into a Collection" toggle on the first step.
+
 ## What it imports
 
 | File type | What gets created |
@@ -19,6 +21,7 @@ Also supports **journal-only mode**: if you just want a travel story/journal fro
 | **GPX tracks / KML / KMZ** | Places from waypoints and placemarks |
 | **Google Maps Timeline** (`location-history.json` / `Records.json`) | Places clustered from location history |
 | **Expense CSV** | Cost entries with auto-detected categories, localized number formats handled |
+| **Google Maps "Saved places" export, KML/KMZ, place-list CSV, or a pasted Google/Naver Maps list link** *(Collection mode only)* | Places saved into a Collection instead of a trip |
 
 A Polarsteps ZIP with multiple trips detected inside becomes multiple separate TREK trips, each auto-scoped to its own dates — nothing gets dumped into one trip by mistake. Large trips (100+ Polarsteps steps, big expense CSVs, hundreds of GPS clusters) are automatically paginated across several import calls so nothing gets rejected for being too large in one request.
 
@@ -49,6 +52,8 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 - **Undo** removes reservations, accommodations, costs, places and journal entries created by the import — it does not delete the trip itself or its calendar days
 - **Duplicate detection**: re-importing the same Polarsteps trip prompts for confirmation instead of silently creating a second copy
 - Imported photos attach to the trip's **Files** tab (optionally linked to a place) — TREK has no way for a plugin to attach a photo directly into a journal entry's own gallery; this is a platform limitation, not something this plugin can work around
+- **Collection mode**: the Google Maps "Saved places" export parser is best-effort against the general Takeout GeoJSON shape and hasn't been verified against a real export — if your file doesn't parse, please report it (with a sanitized sample if possible) so the parser can be adjusted; KML/KMZ and CSV place-list parsing reuse the same well-tested code paths as the trip importer's other sources
+- **Pasting a shared list link** (Google Maps or Naver Maps) uses the same undocumented internal endpoints TREK's own core "List Import" feature uses — it isn't an official API and could break if either service changes it; a single-*place* share link (as opposed to a *list*) isn't supported, since it carries no list to import — paste that into TREK's own place search instead
 
 ## Permissions
 
@@ -69,7 +74,13 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 | `db:write:daynotes` | Add Polarsteps step descriptions as day notes |
 | `db:read:daynotes` | Read existing day notes (paired with the write permission above) |
 | `db:meta` | Store the Polarsteps trip's own uuid, to detect and warn on duplicate re-imports |
+| `db:read:collections` | List your existing Collections for the "add to existing" picker in Collection mode |
+| `db:write:collections` | Create a Collection and save imported places into it |
 | `ai:invoke` | Optional AI fallback when pattern-matching finds no bookings in a text/email confirmation |
 | `hook:photo-provider` | Makes imported photos searchable through TREK's native photo picker (not yet consumed by any picker UI in the current TREK release — see Setup) |
 | `http:outbound:nominatim.openstreetmap.org` | Reverse geocoding for GPS places |
 | `http:outbound:polarsteps.s3.amazonaws.com` | Fetching the trip cover photo and step photos directly from Polarsteps' own CDN |
+| `http:outbound:www.google.com` | Resolving a pasted Google Maps list link and fetching its places (Collection mode) |
+| `http:outbound:maps.app.goo.gl` / `http:outbound:goo.gl` | Following a shortened Google Maps list link to its real URL |
+| `http:outbound:naver.me` | Following a shortened Naver Maps list link to its real URL |
+| `http:outbound:pages.map.naver.com` | Fetching a shared Naver Maps list's places |
