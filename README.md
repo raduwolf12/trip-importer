@@ -27,7 +27,7 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 
 ## Screenshots
 
-![Trip Importer wizard](./docs/screenshot.png)
+![Trip Importer wizard](./docs/screenshot.png) 
 
 ## Setup
 
