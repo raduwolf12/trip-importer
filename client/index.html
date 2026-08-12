@@ -1010,8 +1010,24 @@ function trekConfirm(message,opts){
 }
 // Same sandbox limitation as trekConfirm above, for a plain notice rather than a yes/no —
 // bare alert() would be a silent no-op in the real host. Fire-and-forget toast, no response.
+// Word-boundary truncation so a cut-off toast reads as a shortened sentence, not a
+// word sliced in half mid-letter (e.g. "...for individua") — cuts back to the last
+// space before max and appends an ellipsis so the cut is visibly intentional.
+function truncateMsg(str,max){
+  if(str.length<=max)return str;
+  var cut=str.slice(0,max);
+  var sp=cut.lastIndexOf(' ');
+  if(sp>max*0.6)cut=cut.slice(0,sp);
+  return cut+'…';
+}
 function notifyUser(message,level){
-  window.parent.postMessage({type:'trek:notify',level:level||'error',message:message},'*');
+  // No fixed duration was ever sent, so the host toast used its own default —
+  // too short for the longer warning messages this plugin sends (e.g. the
+  // multi-sentence "large ZIP" / "issues while reading" notices), which were
+  // dismissing before a user could finish reading them. Scale with length,
+  // clamped to a sane range.
+  var duration=Math.min(15000,Math.max(4000,message.length*90));
+  window.parent.postMessage({type:'trek:notify',level:level||'error',message:message,duration:duration},'*');
 }
 window.addEventListener('message',function(e){
   if(e.source!==window.parent)return;var m=e.data;if(!m||typeof m!=='object')return;
@@ -1349,7 +1365,7 @@ async function doAnalyze(){
       jsonWarnings.push(jf.name+': '+(e&&e.message||e));
     }
   }
-  if(jsonWarnings.length)notifyUser(jsonWarnings.length+' issue'+(jsonWarnings.length===1?'':'s')+' while reading your files: '+jsonWarnings.join('; ').slice(0,400),'warning');
+  if(jsonWarnings.length)notifyUser(jsonWarnings.length+' issue'+(jsonWarnings.length===1?'':'s')+' while reading your files: '+truncateMsg(jsonWarnings.join('; '),400),'warning');
   // Multiple Polarsteps journeys select ALL of them by default — the user deselects any they
   // don't want in the step 2 preview (renderPolarstepsPreview). Each selected journey becomes
   // its own trip at import time (computeTripTargets()), auto-scoped to its own dates — see
@@ -1556,7 +1572,7 @@ async function doAnalyzeCollection(){
     }catch(e){warnings.push(cf.name+': '+e.message);}
   }
 
-  if(warnings.length)notifyUser(warnings.length+' file'+(warnings.length===1?'':'s')+" couldn't be read: "+warnings.join('; ').slice(0,180),'warning');
+  if(warnings.length)notifyUser(warnings.length+' file'+(warnings.length===1?'':'s')+" couldn't be read: "+truncateMsg(warnings.join('; '),180),'warning');
 
   showSt1('','');
   document.getElementById('st1-status').style.display='none';
