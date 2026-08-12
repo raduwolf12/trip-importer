@@ -724,7 +724,7 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 `
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.1 loaded') },
   routes: [
 
     // ── List trips ────────────────────────────────────────────────────────────

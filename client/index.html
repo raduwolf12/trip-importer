@@ -1178,35 +1178,62 @@ async function doAnalyze(){
 
   // 1. Process ZIPs — extract Polarsteps trip.json(s), step photos, generic photos, and timeline
   var stepPhotoEntries=[]; // {stepId, path, entry, name} across every zip — read into stepPhotosByStepId below
+  // Polarsteps' "download all my data" account export (user_data.zip) does NOT lay trip.json
+  // files out flat inside one zip like a single-trip export does — it bundles each trip as its
+  // OWN nested .zip file inside the outer zip (confirmed as the root cause of "user_data.zip
+  // doesn't work, individual trip zips do" reports: this loop used to only ever call
+  // JSZip.loadAsync() once, on the top-level file, and never looked at a nested .zip entry as
+  // anything other than an opaque, un-openable blob — no trip.json inside it was ever reachable).
+  // extractZipEntries() now recurses into nested .zip entries (capped at depth 3 / 50 nested
+  // zips total as a sanity bound against a maliciously/accidentally deep zip bomb) so both
+  // shapes funnel through the same trip.json/photo collection logic below.
+  var nestedZipBudget={count:0};
+  async function extractZipEntries(zip,depth,tripJsonEntries,photoEntries,nestedZips){
+    var entries=[];
+    zip.forEach(function(path,entry){entries.push({path:path,entry:entry});});
+    for(var ei=0;ei<entries.length;ei++){
+      var path=entries[ei].path,entry=entries[ei].entry;
+      var p=path.replace(/\\/g,'/');
+      var parts=p.split('/').filter(Boolean);
+      var filename=parts[parts.length-1];
+      if(entry.dir)continue;
+      if(/\.zip$/i.test(filename)){
+        if(depth>=3||nestedZipBudget.count>=50)continue;
+        nestedZipBudget.count++;
+        try{
+          var nestedBuf=await entry.async('arraybuffer');
+          var nestedZip=await JSZip.loadAsync(nestedBuf);
+          await extractZipEntries(nestedZip,depth+1,tripJsonEntries,photoEntries,nestedZips);
+        }catch(ne){console.error('Nested ZIP error:',p,ne);}
+        continue;
+      }
+      // Match ALL trip.json files (multi-trip Polarsteps export)
+      if(filename==='trip.json'&&parts.length<=5)tripJsonEntries.push({entry:entry,path:p});
+      // Google Maps timeline
+      if(filename==='location-history.json'||filename==='Records.json')jsonFiles.push({_entry:entry,name:filename,_isTimeline:true});
+      // Google Photos Takeout per-photo sidecar ("IMG_1234.jpg.json" next to "IMG_1234.jpg") —
+      // shape-checked (photoTakenTime+geoData) in the JSON loop below, this just gathers candidates.
+      if(/\.(jpe?g|png)\.json$/i.test(filename))jsonFiles.push({_entry:entry,name:filename,_isTakeoutSidecar:true});
+      var ext=(filename.split('.').pop()||'').toLowerCase();
+      if(!['jpg','jpeg','png'].includes(ext))continue;
+      // Polarsteps has NO photo path field in trip.json at all — each step's media lives in a
+      // sibling folder named "<slug>_<stepId>/photos/*" (confirmed against the community
+      // polarsteps-data-parser project). These already have a known lat/lon from the step
+      // itself, so they're uploaded separately (attached to that step's place, post-import —
+      // see doImport()) rather than mixed into the generic EXIF/GPS-detection pipeline below.
+      var stepPhotoMatch=p.match(/\/[^\/]+_(\d+)\/photos\/[^\/]+$/i);
+      if(stepPhotoMatch){stepPhotoEntries.push({stepId:stepPhotoMatch[1],entry:entry,name:filename});continue;}
+      photoEntries.push({path:p,entry:entry,name:filename});
+    }
+  }
   for(var zf of zipFiles){
     try{
       showSt1('Extracting '+zf.name+'…','');
       var zip=await JSZip.loadAsync(zf);
       var tripJsonEntries=[];
       var photoEntries=[];
-      zip.forEach(function(path,entry){
-        var p=path.replace(/\\/g,'/');
-        var parts=p.split('/').filter(Boolean);
-        var filename=parts[parts.length-1];
-        // Match ALL trip.json files (multi-trip Polarsteps export)
-        if(filename==='trip.json'&&parts.length<=5)tripJsonEntries.push({entry:entry,path:p});
-        // Google Maps timeline
-        if(filename==='location-history.json'||filename==='Records.json')jsonFiles.push({_entry:entry,name:filename,_isTimeline:true});
-        // Google Photos Takeout per-photo sidecar ("IMG_1234.jpg.json" next to "IMG_1234.jpg") —
-        // shape-checked (photoTakenTime+geoData) in the JSON loop below, this just gathers candidates.
-        if(/\.(jpe?g|png)\.json$/i.test(filename))jsonFiles.push({_entry:entry,name:filename,_isTakeoutSidecar:true});
-        var ext=(filename.split('.').pop()||'').toLowerCase();
-        if(!['jpg','jpeg','png'].includes(ext)||entry.dir)return;
-        // Polarsteps has NO photo path field in trip.json at all — each step's media lives in a
-        // sibling folder named "<slug>_<stepId>/photos/*" (confirmed against the community
-        // polarsteps-data-parser project). These already have a known lat/lon from the step
-        // itself, so they're uploaded separately (attached to that step's place, post-import —
-        // see doImport()) rather than mixed into the generic EXIF/GPS-detection pipeline below.
-        var stepPhotoMatch=p.match(/\/[^\/]+_(\d+)\/photos\/[^\/]+$/i);
-        if(stepPhotoMatch){stepPhotoEntries.push({stepId:stepPhotoMatch[1],entry:entry,name:filename});return;}
-        photoEntries.push({path:p,entry:entry,name:filename});
-      });
-      // ALL Polarsteps trips in this ZIP
+      await extractZipEntries(zip,0,tripJsonEntries,photoEntries);
+      // ALL Polarsteps trips in this ZIP (including ones found inside nested per-trip zips)
       for(var tje of tripJsonEntries){
         var txt=await tje.entry.async('text');
         jsonFiles.push({_text:txt,name:tje.path});
@@ -1271,10 +1298,27 @@ async function doAnalyze(){
         }catch(_e){}
       } else {
         // Try as Polarsteps trip.json — see parsePolarstepsSmart() for why this isn't just one
-        // invoke() call for a large trip.
+        // invoke() call for a large trip. A bare trip.json (no zip) can itself be a JSON ARRAY
+        // of multiple full trip objects — some Polarsteps export paths bundle "all my trips" as
+        // one array-of-trips file rather than one file per trip. /parse-polarsteps's own server
+        // handler only ever reads data[0] out of an array (a single-trip contract), so without
+        // this every trip after the first in such a file silently vanished. Detect that shape
+        // client-side first and fan out one parsePolarstepsSmart() call per array element.
         if(text.length>150000)showSt1('Parsing '+jf.name+' ('+(text.length/1e6).toFixed(1)+'MB, this may take a moment)…','');
-        var data=await parsePolarstepsSmart(text,jf.name,jsonWarnings);
-        if(data)polarstepsList.push(data);
+        var multiTrip=null;
+        try{
+          var maybeArr=JSON.parse(text);
+          if(Array.isArray(maybeArr)&&maybeArr.length>1&&maybeArr.every(function(el){return el&&typeof el==='object'&&(Array.isArray(el.all_steps)||el.name||el.uuid);}))multiTrip=maybeArr;
+        }catch(_pe){}
+        if(multiTrip){
+          for(var mi=0;mi<multiTrip.length;mi++){
+            var mData=await parsePolarstepsSmart(JSON.stringify(multiTrip[mi]),jf.name+' #'+(mi+1),jsonWarnings);
+            if(mData)polarstepsList.push(mData);
+          }
+        } else {
+          var data=await parsePolarstepsSmart(text,jf.name,jsonWarnings);
+          if(data)polarstepsList.push(data);
+        }
       }
     }catch(e){console.warn('JSON parse error:',e);}
   }
