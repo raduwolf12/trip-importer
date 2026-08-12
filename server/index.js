@@ -723,9 +723,34 @@ Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times H
 ---TEXT---
 `
 
+// Diagnostic instrumentation added after a real host reported the plugin's own process getting
+// SIGKILL'd for exceeding a 300MB memory ceiling, repeatedly, with the host's own supervisor logs
+// giving no indication of which route was in flight at the time — nothing in this file's own
+// module-level state (no caches, no timers, no globals that grow) explains a leak on its own, so
+// this wraps every handler to log request size + heap usage before/after, to catch which specific
+// route (and what payload shape) is actually responsible next time this reproduces. Remove once
+// the real cause is confirmed — this is not meant to be permanent.
+function instrumentRoutes(routes) {
+  return routes.map(route => ({
+    ...route,
+    async handler(req, ctx) {
+      const before = process.memoryUsage().heapUsed
+      const bodyBytes = (() => { try { return JSON.stringify(req.body || {}).length } catch (_e) { return -1 } })()
+      let result, err
+      try { result = await route.handler(req, ctx) } catch (e) { err = e; throw e }
+      finally {
+        const after = process.memoryUsage().heapUsed
+        const line = `[mem] ${route.method} ${route.path} bodyBytes=${bodyBytes} heapBefore=${Math.round(before / 1e6)}MB heapAfter=${Math.round(after / 1e6)}MB delta=${Math.round((after - before) / 1e6)}MB${err ? ' THREW=' + err.message : ''}`
+        try { ctx.log.info(line) } catch (_e) { console.log(line) }
+      }
+      return result
+    },
+  }))
+}
+
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.1 loaded') },
-  routes: [
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.2 loaded') },
+  routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
     {
@@ -2113,7 +2138,7 @@ module.exports = definePlugin({
         return safeJson(200, result)
       },
     },
-  ],
+  ]),
 
   // ── photoProvider hook ──────────────────────────────────────────────────────
   // Confirmed against TREK's actual source (plugin-sdk/src/index.ts + the real

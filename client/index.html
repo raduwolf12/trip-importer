@@ -1176,17 +1176,19 @@ async function doAnalyze(){
     else if(n.endsWith('.ics'))icsFiles.push(f);
   });
 
+  // jsonWarnings collects every recoverable failure across BOTH the zip-extraction pass below and
+  // the JSON-parsing pass after it, so one notifyUser() call at the end of doAnalyze() can report
+  // everything that went wrong in one place. Declared up front (used to be declared only ahead of
+  // the JSON loop) because a zip-level failure — a corrupt/huge file that JSZip can't load — used
+  // to go straight to console.error and nowhere else, so the user just saw "No Polarsteps data
+  // found" with zero indication *why*, indistinguishable from "there was genuinely nothing to find."
+  var jsonWarnings=[];
   // 1. Process ZIPs — extract Polarsteps trip.json(s), step photos, generic photos, and timeline
   var stepPhotoEntries=[]; // {stepId, path, entry, name} across every zip — read into stepPhotosByStepId below
-  // Polarsteps' "download all my data" account export (user_data.zip) does NOT lay trip.json
-  // files out flat inside one zip like a single-trip export does — it bundles each trip as its
-  // OWN nested .zip file inside the outer zip (confirmed as the root cause of "user_data.zip
-  // doesn't work, individual trip zips do" reports: this loop used to only ever call
-  // JSZip.loadAsync() once, on the top-level file, and never looked at a nested .zip entry as
-  // anything other than an opaque, un-openable blob — no trip.json inside it was ever reachable).
-  // extractZipEntries() now recurses into nested .zip entries (capped at depth 3 / 50 nested
-  // zips total as a sanity bound against a maliciously/accidentally deep zip bomb) so both
-  // shapes funnel through the same trip.json/photo collection logic below.
+  // Some Polarsteps export shapes reportedly bundle trip data as nested .zip entries rather than
+  // flat trip.json files — extractZipEntries() recurses into any .zip entry it finds (capped at
+  // depth 3 / 50 nested zips total as a sanity bound) so that shape is covered too, on top of the
+  // flat layout every export sample seen so far actually uses.
   var nestedZipBudget={count:0};
   async function extractZipEntries(zip,depth,tripJsonEntries,photoEntries,nestedZips){
     var entries=[];
@@ -1204,7 +1206,10 @@ async function doAnalyze(){
           var nestedBuf=await entry.async('arraybuffer');
           var nestedZip=await JSZip.loadAsync(nestedBuf);
           await extractZipEntries(nestedZip,depth+1,tripJsonEntries,photoEntries,nestedZips);
-        }catch(ne){console.error('Nested ZIP error:',p,ne);}
+        }catch(ne){
+          console.error('Nested ZIP error:',p,ne);
+          jsonWarnings.push('nested zip '+p+': '+(ne&&ne.message||ne));
+        }
         continue;
       }
       // Match ALL trip.json files (multi-trip Polarsteps export)
@@ -1226,13 +1231,28 @@ async function doAnalyze(){
       photoEntries.push({path:p,entry:entry,name:filename});
     }
   }
+  // Purely a heads-up, not a hard block — the actual failure mode for an oversized zip is the
+  // browser silently running out of memory or hanging inside JSZip.loadAsync() below, which
+  // otherwise gives the user no explanation at all for why nothing ever showed up. 300MB is well
+  // above any single-trip export but comfortably within reach of a multi-year "download all my
+  // data" account export.
+  var LARGE_ZIP_WARN_BYTES=300*1024*1024;
   for(var zf of zipFiles){
     try{
+      if(zf.size>LARGE_ZIP_WARN_BYTES){
+        notifyUser(zf.name+' is '+(zf.size/1e6).toFixed(0)+'MB — this may take a while to process in the browser, or fail if it runs out of memory. If it fails, try extracting it locally and re-uploading the trip.json file(s) for individual trips instead.','warning');
+      }
       showSt1('Extracting '+zf.name+'…','');
-      var zip=await JSZip.loadAsync(zf);
+      var zip;
+      try{
+        zip=await JSZip.loadAsync(zf);
+      }catch(loadErr){
+        throw new Error('could not open ('+(zf.size/1e6).toFixed(0)+'MB) — '+(loadErr&&loadErr.message||loadErr));
+      }
       var tripJsonEntries=[];
       var photoEntries=[];
       await extractZipEntries(zip,0,tripJsonEntries,photoEntries);
+      if(!tripJsonEntries.length)jsonWarnings.push(zf.name+': no trip.json found inside (checked nested zips too — fine if this zip is only photos/other data, not a Polarsteps export)');
       // ALL Polarsteps trips in this ZIP (including ones found inside nested per-trip zips)
       for(var tje of tripJsonEntries){
         var txt=await tje.entry.async('text');
@@ -1245,7 +1265,10 @@ async function doAnalyze(){
       for(var pe of photoEntries.slice(0,300)){
         imgFiles.push({_zipEntry:pe.entry,name:pe.name,_fromZip:true});
       }
-    }catch(e){console.error('ZIP error:',e);}
+    }catch(e){
+      console.error('ZIP error:',zf.name,e);
+      jsonWarnings.push(zf.name+': '+(e&&e.message||e));
+    }
   }
   // Group step photo entries by step id (capped — a long trip can have hundreds) so
   // doImport() can look up "this step's photos" once it knows that step's created placeId.
@@ -1260,12 +1283,13 @@ async function doAnalyze(){
   //    Photos Takeout per-photo sidecars ("IMG_1234.jpg.json": photoTakenTime+geoData)
   var polarstepsList=[];
   var takeoutPoints=[],takeoutCoveredNames={};
-  var jsonWarnings=[]; // surfaced as a toast below — a trip.json this route can't parse used to
-  // just vanish from the picker with nothing but a console.warn; a multi-MB trip.json (a long
-  // trip with hundreds of steps) is exactly the shape most likely to hit the plugin-route
-  // proxy's own undocumented body-size ceiling (already confirmed, for uploads, well under
-  // 10MB) — that failure needs to be visible, not silent, especially since it'd selectively
-  // drop only the LARGEST trip out of a multi-trip export while the others import fine.
+  // jsonWarnings (declared above, before the ZIP pass) keeps accumulating here — a trip.json
+  // this route can't parse used to just vanish from the picker with nothing but a console.warn;
+  // a multi-MB trip.json (a long trip with hundreds of steps) is exactly the shape most likely to
+  // hit the plugin-route proxy's own undocumented body-size ceiling (already confirmed, for
+  // uploads, well under 10MB) — that failure needs to be visible, not silent, especially since
+  // it'd selectively drop only the LARGEST trip out of a multi-trip export while the others
+  // import fine.
   for(var jf of jsonFiles){
     try{
       var text;
@@ -1320,9 +1344,12 @@ async function doAnalyze(){
           if(data)polarstepsList.push(data);
         }
       }
-    }catch(e){console.warn('JSON parse error:',e);}
+    }catch(e){
+      console.warn('JSON parse error:',jf.name,e);
+      jsonWarnings.push(jf.name+': '+(e&&e.message||e));
+    }
   }
-  if(jsonWarnings.length)notifyUser(jsonWarnings.length+' trip file'+(jsonWarnings.length===1?'':'s')+" couldn't be read: "+jsonWarnings.join('; ').slice(0,180),'warning');
+  if(jsonWarnings.length)notifyUser(jsonWarnings.length+' issue'+(jsonWarnings.length===1?'':'s')+' while reading your files: '+jsonWarnings.join('; ').slice(0,400),'warning');
   // Multiple Polarsteps journeys select ALL of them by default — the user deselects any they
   // don't want in the step 2 preview (renderPolarstepsPreview). Each selected journey becomes
   // its own trip at import time (computeTripTargets()), auto-scoped to its own dates — see
@@ -1455,6 +1482,7 @@ async function doAnalyze(){
     }catch(_e){}
   }
 
+  parsed._importWarnings=jsonWarnings; // read by renderPreview() to explain an empty Polarsteps card
   showSt1('','');
   document.getElementById('st1-status').style.display='none';
   btn.disabled=false;
@@ -1581,7 +1609,7 @@ function renderPreview(){
       (parsed.polarstepsAll.length>1?
         (parsed._selectedJourneyIdx||[]).length+' of '+parsed.polarstepsAll.length+' journeys selected':
         parsed.polarsteps.name+' · '+parsed.polarsteps.stepCount+' stops'):
-      'No Polarsteps data found',
+      ((parsed._importWarnings||[]).length?'No Polarsteps data found — see the warning above for why':'No Polarsteps data found'),
     parsed.polarstepsAll.length>0, renderPolarstepsPreview);
   renderSourceCard(grid,'bookings','si-bookings','✈️','Booking Confirmations',
     parsed.bookings.length?parsed.bookings.length+' booking'+(parsed.bookings.length===1?' found':' found')+((parsed._pdfFiles||[]).length?' · '+parsed._pdfFiles.length+' PDF'+(parsed._pdfFiles.length===1?'':'s')+' attached':''):
