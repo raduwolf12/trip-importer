@@ -1,12 +1,12 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.2.2",
+  "version": "2.0.0",
   "apiVersion": 1,
   "type": "page",
   "trek": ">=3.4.0 <4.0.0",
   "author": "raduwolf12",
-  "description": "Reconstruct past trips from Polarsteps, GPS photos, booking PDFs/ICS, expense CSVs and Google Timeline \u2014 auto-creates the trip, journal, places, bookings and costs, with multi-trip detection and undo.",
+  "description": "Reconstruct past trips from Polarsteps, GPS photos, PDF bookings, expense CSVs, Google Timeline, Wanderlog and trip guides \u2014 auto-creates the trip, journal, places, bookings and costs.",
   "icon": "PackageOpen",
   "license": "MIT",
   "nativeModules": false,
@@ -36,7 +36,8 @@
     "http:outbound:maps.app.goo.gl",
     "http:outbound:goo.gl",
     "http:outbound:naver.me",
-    "http:outbound:pages.map.naver.com"
+    "http:outbound:pages.map.naver.com",
+    "http:outbound:wanderlog.com"
   ],
   "egress": [
     "nominatim.openstreetmap.org",
@@ -45,7 +46,8 @@
     "maps.app.goo.gl",
     "goo.gl",
     "naver.me",
-    "pages.map.naver.com"
+    "pages.map.naver.com",
+    "wanderlog.com"
   ],
   "settings": [
     {

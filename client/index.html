@@ -849,6 +849,17 @@ select.field-input{cursor:pointer;}
       <button class="btn-s" id="collection-link-btn" onclick="doImportListLink()">Fetch list</button>
     </div>
   </div>
+  <!-- Trip mode only: a pasted Wanderlog trip share link/key, resolved server-side (/parse-wanderlog)
+       instead of requiring a file export — same "unofficial public endpoint" pattern as the Google/
+       Naver list links above, just for the Trip flow instead of Collection mode. UNCONFIRMED against
+       a real Wanderlog response — see server/index.js's own comment on /parse-wanderlog. -->
+  <div id="wanderlog-link-row" style="margin-top:14px;">
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Or paste a Wanderlog trip share link:</div>
+    <div style="display:flex;gap:8px;">
+      <input type="text" id="wanderlog-link-input" placeholder="https://wanderlog.com/view/… or the trip key" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-elevated);color:var(--text-primary);font-size:13px;"/>
+      <button class="btn-s" id="wanderlog-link-btn" onclick="doImportWanderlogLink()">Fetch trip</button>
+    </div>
+  </div>
   <div id="st1-status" class="st" style="display:none;"></div>
   <div class="btn-row">
     <button class="btn-p" id="analyze-btn" onclick="doAnalyze()">
@@ -1023,7 +1034,7 @@ window.addEventListener('message',function(e){
 
 // ── State ──────────────────────────────────────────────────────────────────
 var files=[],imgFiles=[];
-var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],wanderlogPlaces:[],guidePlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
 var previewOpenSources={};
 var tripMode='new';
 var tripTargets=[]; // computeTripTargets() result — the source of truth once step 3 is entered
@@ -1042,6 +1053,7 @@ function setImportMode(mode){
   document.getElementById('im-collection').className='tmode-btn'+(mode==='collection'?' active':'');
   document.getElementById('collection-mode-hint').style.display=mode==='collection'?'':'none';
   document.getElementById('collection-link-row').style.display=mode==='collection'?'':'none';
+  document.getElementById('wanderlog-link-row').style.display=mode==='collection'?'none':'';
   document.getElementById('trip-step3-fields').style.display=mode==='collection'?'none':'';
   document.getElementById('collection-config').style.display=mode==='collection'?'block':'none';
 }
@@ -1157,7 +1169,7 @@ async function doAnalyze(){
   if(importMode==='collection')return doAnalyzeCollection();
   var btn=document.getElementById('analyze-btn');btn.disabled=true;
   showSt1('Reading files…','');
-  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],wanderlogPlaces:[],guidePlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
   previewOpenSources={};
 
   var zipFiles=[],jsonFiles=[],pdfFiles=[],txtFiles=[],csvFiles=[],gpxFiles=[],kmlFiles=[],kmzFiles=[],icsFiles=[];
@@ -1304,6 +1316,7 @@ async function doAnalyze(){
           parsed.timelinePlaces=tlResult.places;
           console.log('[trip-importer] timeline places:', tlResult.places.length);
         }
+        (tlResult&&tlResult.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
       } else if(jf._isTakeoutSidecar){
         // Shape-check rather than trust the filename alone (Takeout's naming has several
         // variants, e.g. "…supplemental-metadata.json") — a real sidecar has photoTakenTime
@@ -1409,6 +1422,7 @@ async function doAnalyze(){
     if(gpxPoints.length){
       var gpxResult=await invoke('/parse-geo-points','POST',{points:gpxPoints});
       if(gpxResult&&gpxResult.places)parsed.gpxPlaces=gpxResult.places;
+      (gpxResult&&gpxResult.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
     }
   }
 
@@ -1422,6 +1436,7 @@ async function doAnalyze(){
     if(kmlPoints.length){
       var kmlResult=await invoke('/parse-geo-points','POST',{points:kmlPoints});
       if(kmlResult&&kmlResult.places)parsed.kmlPlaces=kmlResult.places;
+      (kmlResult&&kmlResult.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
     }
   }
 
@@ -1470,6 +1485,18 @@ async function doAnalyze(){
         parsed._bookingTextForAI=bookingText;
         document.getElementById('ai-assist-btn').style.display='inline-block';
       }
+      // Independent of whether any bookings were found — a day-by-day guide (Mindtrip-style
+      // PDF export) may share the same text with, or exist entirely without, booking content.
+      // These carry only a name (no coordinates), unlike every other place source here — see
+      // geocodeGuidePlaces() below for the forward-geocode step that resolves lat/lng.
+      if(bResult&&bResult.guidePlaces&&bResult.guidePlaces.length){
+        parsed.guidePlaces=parsed.guidePlaces.concat(bResult.guidePlaces.map(function(g){return {name:g.name,category:g.category||null,dayIndex:g.dayIndex,date:g.date||null,lat:null,lng:null};}));
+      }
+      (bResult&&bResult.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
+      if(parsed.guidePlaces.length){
+        showSt1('Looking up coordinates for '+parsed.guidePlaces.length+' guide place(s)…','');
+        await geocodeGuidePlaces();
+      }
     }catch(_e){}
   }
 
@@ -1479,6 +1506,7 @@ async function doAnalyze(){
       var ct=await readText(cf);
       var cResult=await invoke('/parse-csv','POST',{text:ct});
       if(cResult&&cResult.expenses)parsed.expenses=cResult.expenses.map(function(e){return Object.assign({},e,{_selected:true});});
+      (cResult&&cResult.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
     }catch(_e){}
   }
 
@@ -1589,6 +1617,7 @@ async function doImportListLink(){
       });
       input.value='';
       notifyUser('Added '+result.places.length+' place'+(result.places.length===1?'':'s')+' from "'+src+'"','info');
+      (result.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
       renderCollectionPreview();
       goStep(2);
     }else{
@@ -1596,6 +1625,53 @@ async function doImportListLink(){
     }
   }catch(e){
     notifyUser('Could not fetch that list: '+e.message,'warning');
+  }
+  btn.disabled=false;btn.textContent=origText;
+}
+
+// Fetches a shared Wanderlog trip plan link server-side (/parse-wanderlog — UNCONFIRMED against a
+// real Wanderlog response, see that route's own comment in server/index.js) and appends the
+// result to the Trip flow's parsed.wanderlogPlaces/parsed.bookings, additively — this doesn't
+// reset whatever doAnalyze() already gathered from dropped files, so a user can combine a pasted
+// Wanderlog link with a Polarsteps ZIP, booking PDFs, etc. Places land in their own bucket
+// (parsed.wanderlogPlaces), never merged into parsed.gpsPlaces/timelinePlaces — each Wanderlog
+// stop already carries its own distinct name, so (per the same reasoning Collection-mode sources
+// already follow) it must never be proximity-clustered with clusterByProximity()/
+// computeTargetPlaces() the way anonymous GPS pings are.
+async function doImportWanderlogLink(){
+  var input=document.getElementById('wanderlog-link-input');
+  var link=(input.value||'').trim();
+  if(!link){notifyUser('Paste a Wanderlog trip share link (or its trip key) first.','warning');return;}
+  var btn=document.getElementById('wanderlog-link-btn');
+  var origText=btn.textContent;
+  btn.disabled=true;btn.textContent='Fetching…';
+  try{
+    var result=await invoke('/parse-wanderlog','POST',{link:link});
+    if(result&&result.error){
+      notifyUser(result.error,'warning');
+    }else if(result&&((result.places&&result.places.length)||(result.bookings&&result.bookings.length))){
+      var placeCount=(result.places||[]).length, bookingCount=(result.bookings||[]).length;
+      (result.places||[]).forEach(function(p){
+        parsed.wanderlogPlaces.push({name:p.name,lat:p.lat,lng:p.lng,address:p.address||null,notes:p.notes||null,date:p.date||null,_source:result.title||'Wanderlog'});
+      });
+      (result.bookings||[]).forEach(function(b){
+        parsed.bookings.push(Object.assign({},b,{_selected:true}));
+      });
+      if(result.startDate&&!document.getElementById('trip-start').value)document.getElementById('trip-start').value=result.startDate;
+      if(result.endDate&&!document.getElementById('trip-end').value)document.getElementById('trip-end').value=result.endDate;
+      input.value='';
+      var parts=[];
+      if(placeCount)parts.push(placeCount+' place'+(placeCount===1?'':'s'));
+      if(bookingCount)parts.push(bookingCount+' booking'+(bookingCount===1?'':'s'));
+      notifyUser('Added '+parts.join(' and ')+' from "'+(result.title||'Wanderlog trip')+'"','info');
+      (result.notices||[]).forEach(function(n){notifyUser(n.message,n.level==='warn'?'warning':'info');});
+      renderPreview();
+      goStep(2);
+    }else{
+      notifyUser('No places or bookings found in that Wanderlog trip.','warning');
+    }
+  }catch(e){
+    notifyUser('Could not fetch that Wanderlog trip: '+e.message,'warning');
   }
   btn.disabled=false;btn.textContent=origText;
 }
@@ -1630,8 +1706,14 @@ function renderPreview(){
   renderSourceCard(grid,'kml','si-bookings','📌','KML/KMZ Places',
     parsed.kmlPlaces.length?parsed.kmlPlaces.length+' location clusters found':'No KML/KMZ file found',
     parsed.kmlPlaces.length>0, function(body){renderPlacesPreview(body,parsed.kmlPlaces);});
+  renderSourceCard(grid,'wanderlog','si-bookings','🧳','Wanderlog Trip',
+    parsed.wanderlogPlaces.length?parsed.wanderlogPlaces.length+' place'+(parsed.wanderlogPlaces.length===1?'':'s')+' found (unconfirmed mapping — verify before relying on it)':'No Wanderlog trip link fetched',
+    parsed.wanderlogPlaces.length>0, function(body){renderPlacesPreview(body,parsed.wanderlogPlaces);});
+  renderSourceCard(grid,'guideplaces','si-bookings','🗒️','Day-by-Day Guide (Mindtrip-style)',
+    parsed.guidePlaces.length?parsed.guidePlaces.length+' place'+(parsed.guidePlaces.length===1?'':'s')+' found across '+(Math.max.apply(null,parsed.guidePlaces.map(function(p){return p.dayIndex;}))+1)+' day(s) — heuristic layout detection, UNCONFIRMED against a real Mindtrip export':'No day-by-day guide layout found in booking text',
+    parsed.guidePlaces.length>0, function(body){renderPlacesPreview(body,parsed.guidePlaces);});
 
-  var hasAny=parsed.polarstepsAll.length||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length||parsed.gpxPlaces.length||parsed.kmlPlaces.length;
+  var hasAny=parsed.polarstepsAll.length||parsed.bookings.length||parsed.gpsPlaces.length||parsed.expenses.length||parsed.timelinePlaces.length||parsed.gpxPlaces.length||parsed.kmlPlaces.length||parsed.wanderlogPlaces.length||parsed.guidePlaces.length;
   document.getElementById('step2-next').disabled=!hasAny;
   document.getElementById('sources-grid').style.display='';
   document.getElementById('collection-preview').style.display='none';
@@ -1834,7 +1916,7 @@ function buildJourneyTargets(){
       key:key, kind:'journey', journeyIdx:idx, label:j.name,
       mode:'new', title:j.name, startDate:j.startDate||null, endDate:j.endDate||null,
       existingTripId:'', polarsteps:j,
-      bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+      bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], wanderlogPlaces:[],guidePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
     };
   });
 }
@@ -1845,7 +1927,7 @@ function addExtraTarget(){
     key:'x'+extraTargetSeq, kind:'extra', label:'Additional trip '+extraTargetSeq,
     mode:'new', title:'Additional trip '+extraTargetSeq, startDate:null, endDate:null,
     existingTripId:'', polarsteps:null,
-    bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+    bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], wanderlogPlaces:[],guidePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
   });
   rebuildTripTargets();
 }
@@ -1855,7 +1937,7 @@ function removeExtraTarget(key){
   [parsed.bookings,parsed.expenses,parsed.gpsPlaces,parsed.timelinePlaces].concat([imgFiles]).forEach(function(arr){
     arr.forEach(function(it){if(it._assignTo)it._assignTo=it._assignTo.filter(function(k){return k!==key;});});
   });
-  parsed.gpxPlaces.concat(parsed.kmlPlaces).forEach(function(it){if(it._assignTo)it._assignTo=it._assignTo.filter(function(k){return k!==key;});});
+  parsed.gpxPlaces.concat(parsed.kmlPlaces).concat(parsed.wanderlogPlaces).concat(parsed.guidePlaces||[]).forEach(function(it){if(it._assignTo)it._assignTo=it._assignTo.filter(function(k){return k!==key;});});
   Object.keys(parsed._stepPhotoAssign||{}).forEach(function(sid){
     parsed._stepPhotoAssign[sid]=(parsed._stepPhotoAssign[sid]||[]).filter(function(k){return k!==key;});
   });
@@ -1884,7 +1966,7 @@ function setStepPhotoAssigned(stepId,key,assigned){
 // Never rebuilds the target shells themselves — see the state-split note above.
 function rebuildTripTargets(){
   var targets=journeyTargets.concat(extraTargets);
-  targets.forEach(function(t){t.bookings=[];t.expenses=[];t.gpsPlaces=[];t.timelinePlaces=[];t.imgFiles=[];t.stepPhotosByStepId={};});
+  targets.forEach(function(t){t.bookings=[];t.expenses=[];t.gpsPlaces=[];t.timelinePlaces=[];t.wanderlogPlaces=[];t.guidePlaces=[];t.imgFiles=[];t.stepPhotosByStepId={};});
   // Solo mode: zero journeys AND zero extra trips added — there is exactly one implicit target
   // (added below) and NOTHING is filtered or requires assignment, matching the classic
   // single-trip wizard byte for byte. The instant a 2nd target exists (an extra trip added, or
@@ -1897,7 +1979,7 @@ function rebuildTripTargets(){
         key:'x'+extraTargetSeq, kind:'extra', label:'Trip',
         mode:'new', title:parsed.suggestedName||'Imported Trip', startDate:null, endDate:null,
         existingTripId:'', polarsteps:null,
-        bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
+        bookings:[], expenses:[], gpsPlaces:[], timelinePlaces:[], wanderlogPlaces:[],guidePlaces:[], stepPhotosByStepId:{}, imgFiles:[],
       };
       extraTargets.push(soleDefault);
       targets.push(soleDefault);
@@ -1907,6 +1989,8 @@ function rebuildTripTargets(){
     parsed.expenses.filter(function(e){return e._selected;}).forEach(function(e){sole.expenses.push(e);});
     parsed.gpsPlaces.forEach(function(p){sole.gpsPlaces.push(p);});
     parsed.timelinePlaces.concat(parsed.gpxPlaces||[]).concat(parsed.kmlPlaces||[]).forEach(function(p){sole.timelinePlaces.push(p);});
+    (parsed.wanderlogPlaces||[]).forEach(function(p){sole.wanderlogPlaces.push(p);});
+    (parsed.guidePlaces||[]).forEach(function(p){sole.guidePlaces.push(p);});
     imgFiles.forEach(function(img){sole.imgFiles.push(img);});
     Object.keys(parsed._stepPhotosByStepId||{}).forEach(function(sid){sole.stepPhotosByStepId[sid]=parsed._stepPhotosByStepId[sid];});
     unassigned=null;
@@ -1924,7 +2008,7 @@ function rebuildTripTargets(){
     }
     return null;
   }
-  var un={bookings:[],expenses:[],gpsPlaces:[],timelinePlaces:[],imgFiles:[],stepPhotosByStepId:{}};
+  var un={bookings:[],expenses:[],gpsPlaces:[],timelinePlaces:[],wanderlogPlaces:[],guidePlaces:[],imgFiles:[],stepPhotosByStepId:{}};
   function route(item,dateStr,bucket){
     var auto=journeyForDate(dateStr);
     if(auto){auto[bucket].push(item);return;}
@@ -1937,6 +2021,15 @@ function rebuildTripTargets(){
   parsed.expenses.filter(function(e){return e._selected;}).forEach(function(e){route(e,e.date,'expenses');});
   parsed.gpsPlaces.forEach(function(p){route(p,p.date,'gpsPlaces');});
   parsed.timelinePlaces.concat(parsed.gpxPlaces||[]).concat(parsed.kmlPlaces||[]).forEach(function(p){route(p,p.date,'timelinePlaces');});
+  // Wanderlog stops keep their own bucket (never merged into timelinePlaces) — each already
+  // carries a distinct name, so computeTargetPlaces() must not proximity-cluster them the way it
+  // does gpsPlaces/timelinePlaces (see doImportWanderlogLink()'s own comment on why).
+  (parsed.wanderlogPlaces||[]).forEach(function(p){route(p,p.date,'wanderlogPlaces');});
+  // Guide places (Mindtrip-style day-by-day PDF guides) keep their own bucket for the same
+  // reason Wanderlog stops do — each already carries its own distinct name. dayIndex is
+  // resolved to an actual date (extendGuidePlacesDates()/prepareStep3()) before this runs,
+  // so route() below can key off .date exactly like every other date-bearing source.
+  (parsed.guidePlaces||[]).forEach(function(p){route(p,p.date,'guidePlaces');});
   // Dropped/zipped photo FILES (not just their extracted gpsPlaces cluster) — same date logic,
   // using each photo's own resolved EXIF/Takeout date stamped onto it in doAnalyze() step 3.
   imgFiles.forEach(function(img){route(img,img._date||null,'imgFiles');});
@@ -1960,7 +2053,7 @@ function targetHasContent(t){
   return !!(t.polarsteps||t.bookings.length||t.expenses.length||t.gpsPlaces.length||t.timelinePlaces.length||t.imgFiles.length||Object.keys(t.stepPhotosByStepId).length);
 }
 function unassignedHasContent(){
-  return !!(unassigned&&(unassigned.bookings.length||unassigned.expenses.length||unassigned.gpsPlaces.length||unassigned.timelinePlaces.length||unassigned.imgFiles.length||Object.keys(unassigned.stepPhotosByStepId).length));
+  return !!(unassigned&&(unassigned.bookings.length||unassigned.expenses.length||unassigned.gpsPlaces.length||unassigned.timelinePlaces.length||(unassigned.wanderlogPlaces||[]).length||(unassigned.guidePlaces||[]).length||unassigned.imgFiles.length||Object.keys(unassigned.stepPhotosByStepId).length));
 }
 
 // ── Configure (Collection mode) ─────────────────────────────────────────────
@@ -2019,17 +2112,24 @@ async function prepareStep3(){
     // across this target's own sources so the fields aren't left blank.
     var startEl=document.getElementById('trip-start'),endEl=document.getElementById('trip-end');
     var dateHint=document.getElementById('date-detect-hint');
+    // Resolve any dayIndex-only guide places into real dates as soon as SOME start date is
+    // known — a Polarsteps-declared date takes priority, then whatever the user's already
+    // typed into #trip-start. Left dateless (dayIndex unresolved) if neither is known yet;
+    // re-run every time prepareStep3() runs (e.g. after the user types a start date and hits
+    // Back → Continue), so it isn't a one-shot best-effort guess.
+    resolveGuidePlaceDates((target&&target.startDate)||startEl.value||null);
     if(!(target&&target.startDate)&&!startEl.value&&!endEl.value){
       // Only well-formed YYYY-MM-DD strings are safe to sort for min/max — a stray malformed
       // date sorts unpredictably against real ISO dates and can silently pick a garbage
       // min/max, which <input type="date"> then rejects on assignment, leaving the field blank.
       var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
       var allDates=[];
-      var src=target||{bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[]};
+      var src=target||{bookings:[],gpsPlaces:[],timelinePlaces:[],expenses:[],guidePlaces:[]};
       src.bookings.forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
       src.gpsPlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
       src.timelinePlaces.forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
       src.expenses.forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+      (src.guidePlaces||[]).forEach(function(g){if(isoDateRe.test(g.date))allDates.push(g.date);});
       allDates.sort();
       if(allDates.length){
         startEl.value=allDates[0];endEl.value=allDates[allDates.length-1];
@@ -2038,6 +2138,22 @@ async function prepareStep3(){
           dateHint.style.display='';
         }
       }
+    }else if(target){
+      // The trip DOES have a declared/typed range here, but per CLAUDE.md's date-range-extension
+      // history, a source's date can still fall outside it (a GPS photo the day before/after the
+      // Polarsteps window, a timezone-edge date) — extendDateRange() (used for real at import
+      // time in importOneTarget()) would silently widen the range there with no visible sign of
+      // it having happened. Preview the same computation here so the user sees it before
+      // clicking Import, not after.
+      var origStart=startEl.value||null,origEnd=endEl.value||null;
+      var previewPlaces=[];
+      try{previewPlaces=computeTargetPlaces(target);}catch(_e){}
+      var previewExt=extendDateRange(origStart,origEnd,target,previewPlaces);
+      if(dateHint&&(previewExt.startDate!==origStart||previewExt.endDate!==origEnd)){
+        dateHint.textContent='📅 Trip dates extended from '+(origStart||'?')+' – '+(origEnd||'?')+' to '+
+          (previewExt.startDate||'?')+' – '+(previewExt.endDate||'?')+' to cover dates found in your imported bookings/photos/expenses that fall outside the original range. Double-check before importing.';
+        dateHint.style.display='';
+      }else if(dateHint){dateHint.style.display='none';}
     }else if(dateHint){dateHint.style.display='none';}
 
     var sel=document.getElementById('trip-select');
@@ -2097,7 +2213,7 @@ function renderTripTargets(){
     var counts=[];
     if(t.polarsteps)counts.push(t.polarsteps.stepCount+' stops');
     if(t.bookings.length)counts.push(t.bookings.length+' booking'+(t.bookings.length===1?'':'s'));
-    var locCount=t.gpsPlaces.length+t.timelinePlaces.length;
+    var locCount=t.gpsPlaces.length+t.timelinePlaces.length+(t.wanderlogPlaces||[]).length+(t.guidePlaces||[]).length;
     if(locCount)counts.push(locCount+' location'+(locCount===1?'':'s'));
     if(t.imgFiles.length)counts.push(t.imgFiles.length+' photo'+(t.imgFiles.length===1?'':'s'));
     if(t.expenses.length)counts.push(t.expenses.length+' expense'+(t.expenses.length===1?'':'s'));
@@ -2433,9 +2549,9 @@ async function doImportCollection(){
   do{
     round++;
     var callBody={collectionConfig:collectionConfig,progress:progress,totalPlaces:selected.length};
-    var offset=progress?progress.places||0:0;
-    callBody.places=selected.slice(offset,offset+PLACES_PER_ROUND);
-    callBody.placesOffset=offset;
+    var collPlacesWindow=nextWindow(progress,'places',selected,PLACES_PER_ROUND);
+    callBody.places=collPlacesWindow.slice;
+    callBody.placesOffset=collPlacesWindow.offset;
     result=await invoke('/import-collection','POST',callBody);
     // Switch to 'existing' after the first round, same reason the trip flow does this for
     // tripConfig — a NEW collection must only ever be created once, on round 1.
@@ -2623,6 +2739,72 @@ function clusterByProximity(places,radiusMetres){
   return clusters;
 }
 
+// Shared by every paginated /import (and /import-collection) round-windowing site below
+// (steps/bookings/expenses/places, both the initial per-round slice and the JSON-size shrink
+// retry) — replaces what used to be near-identical inline
+// `offset=progress?progress.<key>||0:0; arr.slice(offset,offset+limit)` blocks repeated once per
+// source. `progress` is the resumable progress object from the previous round's response (or
+// undefined on round 1); `progressKey` is that source's own next-index field on it
+// (journal/bookings/costs/places); `allItems`/`limit` are the full in-memory array and this
+// round's window size. Returns {offset, slice} — callers still attach `slice` to the request body
+// and send `offset` as the matching `<section>Offset` field themselves (this only centralizes the
+// slicing arithmetic, not the wire shape).
+function nextWindow(progress,progressKey,allItems,limit){
+  var offset=progress?progress[progressKey]||0:0;
+  return {offset:offset,slice:allItems.slice(offset,offset+limit)};
+}
+
+// Adds `n` days to an ISO YYYY-MM-DD date string, returning another ISO string. Used only for
+// resolving a guide place's dayIndex (0-based "Day N" from a Mindtrip-style guide) into an
+// actual calendar date, relative to whatever trip start date is known at the time.
+function addDaysToIsoDate(isoDate,n){
+  var parts=isoDate.split('-').map(Number);
+  var d=new Date(Date.UTC(parts[0],parts[1]-1,parts[2]));
+  d.setUTCDate(d.getUTCDate()+n);
+  return d.toISOString().slice(0,10);
+}
+
+// Resolves each parsed.guidePlaces entry's dayIndex into an actual .date, relative to
+// startDate (the trip's own start date — Polarsteps date, user-typed #trip-start value, or
+// whatever else has already been determined by the time this runs). A guide place that
+// already has its own .date (from a written-out day-date header, not just "Day N") keeps it
+// unchanged — dayIndex-based resolution only fills in what parseGuidePlaces couldn't already
+// determine from the text itself. No-ops (leaves .date null) if no startDate is known yet —
+// better to leave a guide place dateless than guess an absolute date from nothing.
+function resolveGuidePlaceDates(startDate){
+  if(!startDate||!/^\d{4}-\d{2}-\d{2}$/.test(startDate))return;
+  parsed.guidePlaces.forEach(function(g){
+    if(!g.date&&typeof g.dayIndex==='number'&&g.dayIndex>=0){
+      try{g.date=addDaysToIsoDate(startDate,g.dayIndex);}catch(_e){}
+    }
+  });
+}
+
+// Forward-geocodes every parsed.guidePlaces entry that doesn't already have lat/lng (see
+// /geocode-guide-places' own comment in server/index.js — Mindtrip-style guide places carry
+// only a name, unlike every other place source here). Budget-aware/resumable across rounds
+// the same way /import is, since Nominatim's 1req/sec limit means a guide with more than a
+// handful of places can't resolve in one ~8s trek:invoke round trip. Capped at 300 rounds as
+// a runaway backstop (mirrors doImport()'s 200-round cap, sized up slightly since each round
+// here typically only advances a few names given the 1req/sec throttle).
+async function geocodeGuidePlaces(){
+  var pending=parsed.guidePlaces.filter(function(g){return typeof g.lat!=='number'||typeof g.lng!=='number';});
+  if(!pending.length)return;
+  var names=pending.map(function(g){return g.name;});
+  var offset=0,rounds=0;
+  while(offset<names.length&&rounds<300){
+    rounds++;
+    try{
+      var res=await invoke('/geocode-guide-places','POST',{names:names,offset:offset});
+      (res&&res.resolved||[]).forEach(function(r){
+        if(r.lat!=null&&r.lng!=null){pending[r.index].lat=r.lat;pending[r.index].lng=r.lng;}
+      });
+      offset=res&&typeof res.nextOffset==='number'?res.nextOffset:names.length;
+      if(res&&res.done)break;
+    }catch(_e){break;}
+  }
+}
+
 // Computes the deduplicated, clustered places list for one target — mirrors /import's own
 // "3. GPS + Timeline Places" section in server/index.js exactly (same dedup-against-Polarsteps-
 // coords logic, same 800m cluster radius), just moved here so it runs ONCE up front instead of
@@ -2632,11 +2814,26 @@ function clusterByProximity(places,radiusMetres){
 // to be sent at all now. Server still knows how to cluster from raw gpsPlaces/timelinePlaces
 // itself as a fallback (see /import's section 3), in case `places`/`totalPlaces` are absent.
 function computeTargetPlaces(target){
-  if(!target.gpsPlaces.length&&!target.timelinePlaces.length)return [];
-  var polarstepsCoords=((target.polarsteps&&target.polarsteps.steps)||[]).filter(function(s){return s.location&&s.location.lat!=null;}).map(function(s){return {lat:s.location.lat,lng:s.location.lon};});
-  var allRawPlaces=(target.gpsPlaces||[]).concat(target.timelinePlaces||[]);
-  var deduplicated=allRawPlaces.filter(function(pt){return !polarstepsCoords.some(function(ps){return haversine(ps.lat,ps.lng,pt.lat,pt.lng)<800;});});
-  return clusterByProximity(deduplicated,800);
+  var clustered=[];
+  if(target.gpsPlaces.length||target.timelinePlaces.length){
+    var polarstepsCoords=((target.polarsteps&&target.polarsteps.steps)||[]).filter(function(s){return s.location&&s.location.lat!=null;}).map(function(s){return {lat:s.location.lat,lng:s.location.lon};});
+    var allRawPlaces=(target.gpsPlaces||[]).concat(target.timelinePlaces||[]);
+    var deduplicated=allRawPlaces.filter(function(pt){return !polarstepsCoords.some(function(ps){return haversine(ps.lat,ps.lng,pt.lat,pt.lng)<800;});});
+    clustered=clusterByProximity(deduplicated,800);
+  }
+  // Wanderlog stops each already carry their own distinct name (like every Collection-mode
+  // source) — never run through clusterByProximity(), which would wrongly merge two
+  // differently-named stops that happen to sit close together. Each becomes its own
+  // single-member "cluster" so it flows through the exact same downstream place-creation path
+  // (/import's section 3) as a real cluster, just never merged with anything else.
+  var wanderlogClusters=(target.wanderlogPlaces||[]).map(function(p){return {lat:p.lat,lng:p.lng,members:[p],name:p.name,date:p.date};});
+  // Guide places (Mindtrip-style day-by-day PDF guides) follow the exact same reasoning as
+  // Wanderlog stops above — each already carries its own distinct name, so it's never
+  // proximity-clustered. Unlike Wanderlog stops, a guide place may still be missing lat/lng if
+  // geocodeGuidePlaces() couldn't resolve it — filtered out here since computeTargetPlaces()'s
+  // downstream consumers (extendDateRange, /import's place-creation) all assume a real lat/lng.
+  var guideClusters=(target.guidePlaces||[]).filter(function(p){return typeof p.lat==='number'&&typeof p.lng==='number';}).map(function(p){return {lat:p.lat,lng:p.lng,members:[p],name:p.name,date:p.date};});
+  return clustered.concat(wanderlogClusters).concat(guideClusters);
 }
 
 // Extends [startDate,endDate] to cover every well-formed date found across a target's own
@@ -2657,6 +2854,7 @@ function extendDateRange(startDate,endDate,target,places){
   });
   (target.bookings||[]).forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
   (target.expenses||[]).forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+  (target.guidePlaces||[]).forEach(function(g){if(isoDateRe.test(g.date))allDates.push(g.date);});
   (places||[]).forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
   allDates.sort();
   var result={startDate:startDate,endDate:endDate};
@@ -2696,7 +2894,7 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     {id:kp+'trip',label:target.mode==='new'?'Creating trip':'Linking to trip',icon:'🗺️'},
     (options.importJournal||options.importPlaces||options.importBookings)?{id:kp+'days',label:'Preparing trip calendar days',icon:'📅'}:null,
     options.importJournal&&target.polarsteps?{id:kp+'journal',label:'Creating journal entries ('+target.polarsteps.stepCount+' stops)',icon:'📔'}:null,
-    options.importPlaces&&(target.polarsteps||target.gpsPlaces.length||target.timelinePlaces.length)?{id:kp+'places',label:'Adding places & GPS locations',icon:'📍'}:null,
+    options.importPlaces&&(target.polarsteps||target.gpsPlaces.length||target.timelinePlaces.length||target.wanderlogPlaces.length||(target.guidePlaces||[]).length)?{id:kp+'places',label:'Adding places & GPS locations',icon:'📍'}:null,
     options.importBookings&&target.bookings.length?{id:kp+'bookings',label:'Importing '+target.bookings.length+' bookings',icon:'✈️'}:null,
     options.importBookings&&pdfFiles.length?{id:kp+'pdfbooks',label:'Attaching '+pdfFiles.length+' original PDF'+(pdfFiles.length===1?'':'s')+' to the trip',icon:'📄'}:null,
     options.importCosts&&target.expenses.length?{id:kp+'costs',label:'Adding '+target.expenses.length+' expenses',icon:'💸'}:null,
@@ -2756,28 +2954,31 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     // per-round slicing (progress.X still advances normally; it just always covers the same
     // fixed unchanging array).
     var callBody=Object.assign({tripConfig:tripConfig,progress:progress},importBody);
-    var stepOffset=progress?progress.journal||0:0,stepLimit=STEPS_PER_ROUND;
+    var stepOffset=0,stepLimit=STEPS_PER_ROUND;
     if(allSteps.length>STEPS_PER_ROUND&&target.polarsteps){
-      stepOffset=progress?progress.journal||0:0;
-      var stepSlice=allSteps.slice(stepOffset,stepOffset+stepLimit);
-      callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:stepSlice,_stepOffset:stepOffset,_totalSteps:allSteps.length});
+      var stepsWindow=nextWindow(progress,'journal',allSteps,stepLimit);
+      stepOffset=stepsWindow.offset;
+      callBody.polarsteps=Object.assign({},polarstepsMeta,{steps:stepsWindow.slice,_stepOffset:stepOffset,_totalSteps:allSteps.length});
     }
     var bookingsOffset=0,bookingsLimit=BOOKINGS_PER_ROUND;
     if(allBookings.length>BOOKINGS_PER_ROUND){
-      bookingsOffset=progress?progress.bookings||0:0;
-      callBody.bookings=allBookings.slice(bookingsOffset,bookingsOffset+bookingsLimit);
+      var bookingsWindow=nextWindow(progress,'bookings',allBookings,bookingsLimit);
+      bookingsOffset=bookingsWindow.offset;
+      callBody.bookings=bookingsWindow.slice;
       callBody.bookingsOffset=bookingsOffset;
     }
     var expensesOffset=0,expensesLimit=EXPENSES_PER_ROUND;
     if(allExpenses.length>EXPENSES_PER_ROUND){
-      expensesOffset=progress?progress.costs||0:0;
-      callBody.expenses=allExpenses.slice(expensesOffset,expensesOffset+expensesLimit);
+      var expensesWindow=nextWindow(progress,'costs',allExpenses,expensesLimit);
+      expensesOffset=expensesWindow.offset;
+      callBody.expenses=expensesWindow.slice;
       callBody.expensesOffset=expensesOffset;
     }
     var placesOffset=0,placesLimit=PLACES_PER_ROUND;
     if(allPlaces.length>PLACES_PER_ROUND){
-      placesOffset=progress?progress.places||0:0;
-      callBody.places=allPlaces.slice(placesOffset,placesOffset+placesLimit);
+      var placesWindow=nextWindow(progress,'places',allPlaces,placesLimit);
+      placesOffset=placesWindow.offset;
+      callBody.places=placesWindow.slice;
       callBody.placesOffset=placesOffset;
     }
     // The per-round caps above are item counts, but one Polarsteps stop can contain a long
@@ -2884,11 +3085,11 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   var PHOTO_UPLOAD_MAX_BASE64=85*1024;
   if(options.importBookings&&result.tripId&&pdfFiles.length){
     setProgRunning(kp+'pdfbooks');
-    var pdfOk=0,pdfFail=0,pdfTooBig=0;
+    var pdfOk=0,pdfFail=0,pdfTooBig=0,pdfTooBigNames=[];
     for(var pb of pdfFiles){
       try{
         var b64=await new Promise(function(res,rej){var r=new FileReader();r.onload=function(){res(r.result.split(',')[1]);};r.onerror=rej;r.readAsDataURL(pb);});
-        if(b64.length>PDF_ATTACH_MAX_BASE64){pdfTooBig++;continue;}
+        if(b64.length>PDF_ATTACH_MAX_BASE64){pdfTooBig++;pdfTooBigNames.push(pb.name);continue;}
         var pr=await invoke('/import-pdf-booking','POST',{
           tripId:result.tripId,filename:pb.name,base64:b64,mimetype:pb.type||'application/pdf'
         });
@@ -2898,7 +3099,7 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     }
     setProgDone(kp+'pdfbooks',pdfOk+' PDF'+(pdfOk===1?'':'s')+' attached'+((pdfFail||pdfTooBig)?' ('+(pdfFail+pdfTooBig)+' skipped)':''));
     if(pdfOk)result.log.push({type:'pdfbooks',message:'Attached '+pdfOk+' original PDF'+(pdfOk===1?'':'s')+' to the trip for reference'});
-    if(pdfTooBig)result.log.push({type:'pdfbooks',message:pdfTooBig+' PDF'+(pdfTooBig===1?'':'s')+' too large to attach as a file — the booking itself was still imported from its text'});
+    if(pdfTooBig)result.log.push({type:'pdfbooks',message:'Original PDF'+(pdfTooBig===1?'':'s')+' not attached (too large after compression): '+pdfTooBigNames.slice(0,5).join(', ')+(pdfTooBigNames.length>5?', +'+(pdfTooBigNames.length-5)+' more':'')+' — the booking itself was still imported from its text'});
   }
 
   // Upload this target's own (date-scoped) photos one at a time if opted in.
@@ -3207,8 +3408,9 @@ function renderPlacesPreview(body,places){
   var list=document.createElement('div');list.className='preview-list';
   places.slice(0,8).forEach(function(p){
     var row=document.createElement('div');row.className='preview-item';
-    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+'</span>'+
-      '<span class="pi-meta">'+(p.date||'')+' · '+p.lat.toFixed(3)+', '+p.lng.toFixed(3)+'</span>';
+    var coordsTxt=(typeof p.lat==='number'&&typeof p.lng==='number')?p.lat.toFixed(3)+', '+p.lng.toFixed(3):'no coordinates found';
+    row.innerHTML='<span class="pi-name">'+(p.name||'Location')+(p.category?' ('+p.category+')':'')+'</span>'+
+      '<span class="pi-meta">'+(p.date||'')+' · '+coordsTxt+'</span>';
     list.appendChild(row);
   });
   if(places.length>8){var m=document.createElement('div');m.style.cssText='padding:4px 0;font-size:11px;color:var(--text-faint);';m.textContent='…and '+(places.length-8)+' more';list.appendChild(m);}
@@ -3266,11 +3468,20 @@ async function doAIAssist(){
   showSt1('AI is reading your booking confirmations…','');
   try{
     var bResult=await invoke('/parse-bookings','POST',{text:parsed._bookingTextForAI,useAI:true});
+    if(bResult&&bResult.guidePlaces&&bResult.guidePlaces.length){
+      parsed.guidePlaces=parsed.guidePlaces.concat(bResult.guidePlaces.map(function(g){return {name:g.name,category:g.category||null,dayIndex:g.dayIndex,date:g.date||null,lat:null,lng:null};}));
+      showSt1('Looking up coordinates for '+parsed.guidePlaces.length+' guide place(s)…','');
+      await geocodeGuidePlaces();
+    }
     if(bResult&&bResult.bookings&&bResult.bookings.length){
       parsed.bookings=bResult.bookings.map(function(b){return Object.assign({},b,{_selected:true});});
       showSt1('AI found '+parsed.bookings.length+' booking'+(parsed.bookings.length===1?'':'s'),'');
       btn.style.display='none';
       // Re-render preview if already on step 2
+      if(document.getElementById('step-2').style.display!=='none')renderPreview();
+    } else if(bResult&&bResult.guidePlaces&&bResult.guidePlaces.length){
+      showSt1('AI found '+bResult.guidePlaces.length+' day-by-day guide place(s) instead of bookings.','');
+      btn.style.display='none';
       if(document.getElementById('step-2').style.display!=='none')renderPreview();
     } else {
       showSt1('AI could not find structured bookings either. Try pasting the text directly.','e');
@@ -3283,7 +3494,7 @@ async function doAIAssist(){
 }
 
 function resetAll(){
-  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],wanderlogPlaces:[],guidePlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
   parsedCollection={places:[]};
   previewOpenSources={};
   tripTargets=[];journeyTargets=[];extraTargets=[];unassigned=null;extraTargetSeq=0;

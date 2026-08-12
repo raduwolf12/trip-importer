@@ -22,6 +22,8 @@ And **Collection mode**: import places into one of your Collections (a saved-pla
 | **Google Maps Timeline** (`location-history.json` / `Records.json`) | Places clustered from location history |
 | **Expense CSV** | Cost entries with auto-detected categories, localized number formats handled |
 | **Google Maps "Saved places" export, KML/KMZ, place-list CSV, or a pasted Google/Naver Maps list link** *(Collection mode only)* | Places saved into a Collection instead of a trip |
+| **Pasted Wanderlog trip share link** | Itinerary places and flight/hotel bookings fetched from the trip's own Wanderlog page *(heuristic — Wanderlog's data shape isn't officially documented, double-check results)* |
+| **Day-by-day trip guide PDFs** (e.g. Mindtrip-style exports) | Places recognized from "Day N" headers and place/category lines in the extracted PDF text *(heuristic, unconfirmed against every export format)* |
 
 A Polarsteps ZIP with multiple trips detected inside becomes multiple separate TREK trips, each auto-scoped to its own dates — nothing gets dumped into one trip by mistake. Large trips (100+ Polarsteps steps, big expense CSVs, hundreds of GPS clusters) are automatically paginated across several import calls so nothing gets rejected for being too large in one request.
 
@@ -84,3 +86,4 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 | `http:outbound:maps.app.goo.gl` / `http:outbound:goo.gl` | Following a shortened Google Maps list link to its real URL |
 | `http:outbound:naver.me` | Following a shortened Naver Maps list link to its real URL |
 | `http:outbound:pages.map.naver.com` | Fetching a shared Naver Maps list's places |
+| `http:outbound:wanderlog.com` | Resolving a pasted Wanderlog trip share link and fetching its itinerary |

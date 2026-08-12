@@ -171,6 +171,31 @@ async function reverseGeocode(lat, lng) {
   } catch (_e) { return null }
 }
 
+// ── Nominatim forward geocode (name -> coords) ────────────────────────────────
+// Guide places (Mindtrip-style day-by-day PDF guides — see parseGuidePlaces) arrive with
+// only a name, no coordinates at all, unlike every other place-shaped source in this plugin
+// (GPS EXIF, Google Timeline, Wanderlog, Google/Naver list imports all already carry lat/lng
+// by the time they reach the client). This is the one forward-geocode call site in the whole
+// plugin — mirrors reverseGeocode's timeout/UA/error-swallowing conventions exactly.
+async function geocodePlaceName(name) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name)}&format=json&limit=1`
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 2500)
+    let res
+    try {
+      res = await fetch(url, { headers: { 'User-Agent': 'TREK-trip-importer/1.0' }, signal: controller.signal })
+    } finally { clearTimeout(timeout) }
+    if (!res.ok) return null
+    const data = await res.json()
+    const hit = Array.isArray(data) ? data[0] : null
+    if (!hit) return null
+    const lat = parseFloat(hit.lat), lng = parseFloat(hit.lon)
+    if (!isFinite(lat) || !isFinite(lng)) return null
+    return { lat, lng }
+  } catch (_e) { return null }
+}
+
 // ── Follow redirects for a short link, stopping as soon as a wanted pattern shows up ──────────
 // Confirmed against a real instance: a maps.app.goo.gl share-list link's redirect chain is
 // maps.app.goo.gl -> www.google.com/maps/@/data=...!2s<listId>...  -> consent.google.com/ml?... (a
@@ -271,6 +296,33 @@ function clusterByProximity(places, radiusMetres = 800) {
     }
   }
   return clusters
+}
+
+// Every paginated /import (and /import-collection) section — Polarsteps steps, bookings,
+// expenses, places — used to independently re-derive its own offset/total/loop-bounds inline
+// from a `<section>Offset`/`total<Section>` (or `polarsteps._stepOffset`/`_totalSteps`) pair on
+// the request. That duplication once shipped a real bug: the steps-pagination work referenced
+// `stepOffset`/`totalSteps` in two code paths but never actually declared them, throwing a
+// ReferenceError (this file has 'use strict') on every single Polarsteps journal import. One
+// shared helper makes it structurally impossible to use an offset without its matching total (or
+// vice versa) — the actual root cause of that bug — and centralizes the "no offset/total sent ==
+// unpaginated call, this IS the whole list starting at 0" backward-compatibility fallback that
+// every call site needs to keep older/unpaginated clients working unchanged.
+//
+// `slice` is this round's window of the array (or the full array, on an unpaginated call);
+// `offset`/`total` come straight off the request body, as-is (possibly undefined/null). Returns:
+//   - `total`: the GLOBAL item count across every round (for "done"/"N more queued" checks)
+//   - `end`: the loop's upper bound, i.e. offset + slice.length, re-based into global-index space
+//   - `get(globalIdx)`: re-bases a global progress index (p.bookings, p.costs, etc.) back onto
+//     `slice`, equivalent to the old `arr[i - offset]`
+// Callers still do their own `for (let i = p.<section>; i < win.end; i++)` and set
+// `p.<section> = i` after the loop, exactly as before — this only removes the repeated
+// offset/total derivation and index math, not the loop shape itself.
+function paginatedWindow(slice, offset, total) {
+  const arr = slice || []
+  const off = offset || 0
+  const tot = total ?? (off + arr.length)
+  return { off, total: tot, end: off + arr.length, get: (globalIdx) => arr[globalIdx - off] }
 }
 
 // ── Parse Google Maps Timeline ────────────────────────────────────────────────
@@ -596,6 +648,70 @@ function parseBookingsRegex(text) {
   return bookings
 }
 
+// ── Mindtrip-style day-by-day guide detector ────────────────────────────────
+// Mindtrip.ai (and similar trip-guide tools) export PDFs shaped as a sequence of day
+// headers ("Day 1", "Day 2 - Rome", or a written-out date) each followed by a list of
+// place+category lines ("Colosseum — Landmark", "Trattoria Roma (Restaurant)"). This is
+// a fundamentally different shape than a booking confirmation — there's no from/to,
+// no price, no single "type" — so it's parsed as an independent pass over the same text
+// and returned as a SEPARATE `guidePlaces` array, never folded into `bookings`.
+//
+// IMPORTANT: no real Mindtrip export was available to develop this against — these
+// patterns are a best guess based on how day-by-day trip-guide exports typically read
+// (informed by the sibling `featured-guides` project's treatment of such PDFs as
+// "generic trip-guide documents"), NOT confirmed against real Mindtrip output. Treat any
+// guidePlaces result as heuristic; the caller surfaces a `notices` warning accordingly.
+//
+// Runs independently of parseBookingsRegex's detectors above — it looks for a day-header/
+// place-list pattern, not a route/flight/train pattern, so there's no ordering conflict
+// with the rail-vs-flight sequencing those detectors need (confirmed by reading them: none
+// of them return early in a way that would prevent this from also scanning the same text).
+const DAY_HEADER_RE = /^(?:Day\s+(\d+))\b(?:\s*[-–:]\s*(.+))?$/i
+const DAY_HEADER_DATE_RE = /^(\d{1,2})\s+([\p{L}]+)\s+(\d{4})\b(?:\s*[-–:]\s*(.+))?$/u
+// "Place Name — Category" / "Place Name (Category)" / "Place Name - Category". Requires the
+// left side to start with a capital letter (avoids matching stray sentence fragments) and the
+// category side to be short (a real category word/phrase, not a full sentence).
+const GUIDE_PLACE_LINE_RE = /^([A-ZÀ-Þ][\p{L}0-9 .,'&-]{1,60}?)\s*(?:—|-|–|\()\s*([\p{L}][\p{L} /&-]{1,30})\)?\s*$/u
+const GUIDE_CATEGORY_HINT_RE = /\b(restaurant|cafe|café|bar|museum|landmark|hotel|park|attraction|activity|tour|viewpoint|market|shop|beach|temple|church|gallery|monument|hike|trail|bakery|brewery|winery)\b/i
+
+function parseGuidePlaces(text) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean)
+  const guidePlaces = []
+  let currentDayIndex = null
+  let currentDate = null
+
+  for (const line of lines) {
+    const dm = DAY_HEADER_RE.exec(line)
+    if (dm) {
+      currentDayIndex = parseInt(dm[1], 10) - 1
+      currentDate = null
+      continue
+    }
+    const ddm = DAY_HEADER_DATE_RE.exec(line)
+    if (ddm) {
+      const iso = parseWrittenDate(ddm[1], ddm[2], ddm[3])
+      if (iso) {
+        currentDate = iso
+        if (currentDayIndex === null) currentDayIndex = guidePlaces.length ? currentDayIndex : 0
+        continue
+      }
+    }
+    if (currentDayIndex === null) continue // haven't seen a day header yet — not a guide layout (yet)
+    const pm = GUIDE_PLACE_LINE_RE.exec(line)
+    if (pm) {
+      const name = pm[1].trim()
+      const category = pm[2].trim()
+      // Require the category side to actually look like a category (either a known keyword,
+      // or short enough — 1-2 words — to plausibly be one) to avoid false-matching an ordinary
+      // "Name - some longer descriptive clause" line as a place+category pair.
+      if (GUIDE_CATEGORY_HINT_RE.test(category) || category.split(/\s+/).length <= 2) {
+        guidePlaces.push({ name, category, dayIndex: currentDayIndex, date: currentDate })
+      }
+    }
+  }
+  return guidePlaces
+}
+
 // Map IATA airline prefix to name
 function detectAirline(flightNum) {
   const codes = {
@@ -720,6 +836,8 @@ const BOOKING_PROMPT = `Extract all travel bookings from the text below. Return 
 
 Rules: extract ALL bookings, one entry per flight leg, dates YYYY-MM-DD, times HH:MM 24h, price as number only.
 
+If the text instead reads as a day-by-day trip guide (e.g. "Day 1", "Day 2 - City", or written-out day dates, each followed by a list of place names with a category like Restaurant/Museum/Landmark) rather than booking confirmations, do NOT force those into the bookings shape — instead add a top-level "guidePlaces" array: [{"name":"place name","category":"category or null","dayIndex":0,"date":"YYYY-MM-DD or null"}], with dayIndex being the 0-based day number from the guide. Both "bookings" and "guidePlaces" may be present together if the text contains both kinds of content.
+
 ---TEXT---
 `
 
@@ -749,7 +867,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.2 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v2.0.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -820,6 +938,15 @@ module.exports = definePlugin({
         if (!text || text.trim().length < 20) return safeJson(200, { bookings: [], summary: 'No text' })
         const result = await tryAttempt(async () => {
           const bookings = parseBookingsRegex(text)
+          // Independent pass — a day-by-day Mindtrip-style guide may appear in the same text
+          // regardless of whether the booking detectors above found anything (they look for a
+          // different pattern; see parseGuidePlaces' own comment for why there's no ordering
+          // conflict). guidePlaces is a places-with-a-day-index shape, never merged into bookings.
+          const guidePlaces = parseGuidePlaces(text)
+          const notices = []
+          if (guidePlaces.length) {
+            notices.push({ level: 'warn', message: `Found ${guidePlaces.length} day-by-day guide place(s) (Mindtrip-style layout) — this pattern is a best guess, UNCONFIRMED against a real Mindtrip export. Double-check names/days before importing.` })
+          }
 
           // If regex found nothing and AI is requested, try AI
           if (!bookings.length && useAI) {
@@ -828,11 +955,40 @@ module.exports = definePlugin({
               const raw = (aiResult?.text || '').trim().replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
               const parsed = JSON.parse(raw)
               const aiBookings = (parsed.bookings || []).map((b, i) => ({ ...b, _id: 'ai' + i, _source: 'ai' }))
-              return { bookings: aiBookings, tripName: parsed.trip_name || null, summary: parsed.summary || null, source: 'ai' }
+              const aiGuidePlaces = Array.isArray(parsed.guidePlaces) ? parsed.guidePlaces : []
+              const aiNotices = notices.slice()
+              if (aiGuidePlaces.length) aiNotices.push({ level: 'warn', message: `AI extracted ${aiGuidePlaces.length} day-by-day guide place(s) — unconfirmed, double-check before importing.` })
+              return { bookings: aiBookings, guidePlaces: aiGuidePlaces, tripName: parsed.trip_name || null, summary: parsed.summary || null, source: 'ai', notices: aiNotices }
             } catch (_e) {}
           }
 
-          return { bookings, summary: bookings.length + ' booking' + (bookings.length === 1 ? '' : 's') + ' found', source: 'regex' }
+          return { bookings, guidePlaces, summary: bookings.length + ' booking' + (bookings.length === 1 ? '' : 's') + ' found', source: 'regex', notices }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Forward-geocode guide-place names (Mindtrip-style day-by-day guides have no coords) ──
+    // Budget-aware and index-resumable like /import, for the same reason: Nominatim's 1req/sec
+    // limit means only a handful of names fit under the ~8s trek:invoke bridge ceiling (see
+    // CLAUDE.md's "/import is index-resumable" section) — a large guide needs several rounds.
+    // Client (`geocodeGuidePlaces()`) loops calling this with `offset` until `done`.
+    {
+      method: 'POST', path: '/geocode-guide-places', auth: true,
+      async handler(req, ctx) {
+        const names = req.body?.names || []
+        const offset = req.body?.offset || 0
+        const result = await tryAttempt(async () => {
+          const resolved = []
+          const deadline = Date.now() + 6000
+          let i = offset
+          for (; i < names.length; i++) {
+            if (Date.now() > deadline) break
+            const coords = await geocodePlaceName(names[i])
+            resolved.push({ index: i, lat: coords?.lat ?? null, lng: coords?.lng ?? null })
+            if (i < names.length - 1) await sleep(1100) // Nominatim's ~1 req/sec usage policy
+          }
+          return { resolved, nextOffset: i, done: i >= names.length }
         })
         return safeJson(200, result)
       },
@@ -896,7 +1052,11 @@ module.exports = definePlugin({
           const places = parseGoogleTimeline(data)
           // Cluster nearby points
           const clusters = clusterByProximity(places, 500)
-          return { places: clusters.slice(0, 200), totalPoints: places.length }
+          // Hard cap, not a paginated window — any cluster beyond the 200th is dropped for good,
+          // unlike the resumable per-round windowing /import uses for steps/bookings/expenses.
+          const notices = []
+          if (clusters.length > 200) notices.push({ level: 'warn', message: `Your Google Timeline data clustered into ${clusters.length} distinct places — only the first 200 were kept (a hard limit for this import), so ${clusters.length - 200} were not imported` })
+          return { places: clusters.slice(0, 200), totalPoints: places.length, notices }
         })
         return safeJson(200, result)
       },
@@ -930,6 +1090,14 @@ module.exports = definePlugin({
           const catCol = findCol('category', 'cat', 'type', 'tag', 'label')
 
           const expenses = []
+          // Counts surfaced via `notices` below — per the CLAUDE.md "no silent caps/skips"
+          // guidance, a row silently disappearing (unparseable amount, or no name AND no
+          // amount at all) or silently falling back to no-currency must be visible to the
+          // user, not just absent from the resulting count with no explanation.
+          let skippedBadAmount = 0
+          let skippedEmpty = 0
+          let unparseableDate = 0
+          let noCurrency = 0
           for (let i = 1; i < lines.length; i++) {
             const cols = parseCSVLine(lines[i])
             if (!cols.length || cols.every(c => !c)) continue
@@ -937,9 +1105,9 @@ module.exports = definePlugin({
             // Strip currency symbols/codes but keep digits, both separators, spaces, and the sign —
             // parseLocalizedNumber() decides which of ,/. is the decimal point (same fix as booking prices).
             const amt = parseLocalizedNumber(raw.replace(/[^0-9.,\s-]/g, ''))
-            if (amtCol >= 0 && (isNaN(amt) || amt === 0)) continue
+            if (amtCol >= 0 && (isNaN(amt) || amt === 0)) { skippedBadAmount++; continue }
             const name = nameCol >= 0 ? cols[nameCol] || null : null
-            if (!name && !amt) continue
+            if (!name && !amt) { skippedEmpty++; continue }
 
             // Smart category detection from name
             const nameLower = (name || '').toLowerCase()
@@ -953,16 +1121,29 @@ module.exports = definePlugin({
               else if (/supermarket|market|grocery|shop|store/.test(nameLower)) detectedCat = 'shopping'
             }
 
+            let normDate = null
+            if (dateCol >= 0 && cols[dateCol]) {
+              normDate = normalizeDateStr(cols[dateCol])
+              if (!normDate) unparseableDate++
+            }
+            const currency = currCol >= 0 ? (cols[currCol] || '').toUpperCase().slice(0, 3) || null : null
+            if (!currency) noCurrency++
+
             expenses.push({
               _id: 'e' + i,
-              date: dateCol >= 0 ? normalizeDateStr(cols[dateCol]) : null,
+              date: normDate,
               name: name || ('Expense ' + i),
               amount: Math.abs(amt), // always positive
-              currency: currCol >= 0 ? (cols[currCol] || '').toUpperCase().slice(0, 3) || null : null,
+              currency,
               category: detectedCat || 'other',
             })
           }
-          return { expenses, rowCount: expenses.length }
+          const notices = []
+          if (skippedBadAmount) notices.push({ level: 'warn', message: `Skipped ${skippedBadAmount} row(s) with an amount column that couldn't be parsed as a number` })
+          if (skippedEmpty) notices.push({ level: 'warn', message: `Skipped ${skippedEmpty} row(s) with no recognizable name or amount` })
+          if (unparseableDate) notices.push({ level: 'warn', message: `${unparseableDate} row(s) had a date that couldn't be parsed — left blank, so they won't be date-scoped` })
+          if (noCurrency && expenses.length) notices.push({ level: 'warn', message: `${noCurrency} of ${expenses.length} expense row(s) had no currency column value — will use the trip's default currency` })
+          return { expenses, rowCount: expenses.length, notices }
         })
         return safeJson(200, result)
       },
@@ -993,7 +1174,10 @@ module.exports = definePlugin({
         const result = await tryAttempt(async () => {
           const clean = points.filter(p => typeof p?.lat === 'number' && typeof p?.lng === 'number' && !isNaN(p.lat) && !isNaN(p.lng))
           const clusters = clusterByProximity(clean, 500)
-          return { places: clusters.slice(0, 300), totalPoints: clean.length }
+          // Hard cap, not a paginated window — same as /parse-timeline's 200 cap above.
+          const notices = []
+          if (clusters.length > 300) notices.push({ level: 'warn', message: `Your GPX/KML track clustered into ${clusters.length} distinct places — only the first 300 were kept (a hard limit for this import), so ${clusters.length - 300} were not imported` })
+          return { places: clusters.slice(0, 300), totalPoints: clean.length, notices }
         })
         return safeJson(200, result)
       },
@@ -1019,36 +1203,52 @@ module.exports = definePlugin({
       method: 'POST', path: '/parse-google-places', auth: true,
       async handler(req, ctx) {
         const raw = req.body?.json
-        if (!raw) return safeJson(200, { places: [] })
+        if (!raw) return safeJson(200, { places: [], notices: [] })
         const result = await tryAttempt(async () => {
           const data = typeof raw === 'string' ? JSON.parse(raw) : raw
           const features = Array.isArray(data?.features) ? data.features : []
           const places = []
+          let skippedNoCoords = 0
+          let skippedMalformed = 0
           for (const f of features) {
-            const props = f?.properties || {}
-            const loc = props.location || props.Location || {}
-            let lat = null, lng = null
-            if (Array.isArray(f?.geometry?.coordinates) && f.geometry.coordinates.length >= 2) {
-              lng = Number(f.geometry.coordinates[0]); lat = Number(f.geometry.coordinates[1])
-            } else {
-              const geo = loc.geo_coordinates || loc['Geo Coordinates'] || {}
-              lat = Number(geo.latitude ?? geo.Latitude)
-              lng = Number(geo.longitude ?? geo.Longitude)
-            }
-            if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
-            const name = loc.name || loc['Business Name'] || props.name || props.Title || props.title || null
-            const address = loc.address || loc.Address || null
-            const rawDate = props.date || props.Date || props.Published || props.published || null
-            const date = rawDate ? String(rawDate).slice(0, 10) : null
-            places.push({
-              name: name || address || 'Saved place',
-              lat, lng,
-              address: address || null,
-              date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null,
-            })
+            // Each feature is parsed inside its own try/catch — a single malformed/unexpected-shape
+            // feature (any Takeout format-version drift beyond the variants already handled below)
+            // must degrade to "one fewer place extracted", never abort the whole export's parse.
+            try {
+              const props = f?.properties || {}
+              // Known Takeout GeoJSON variants, confirmed against real exports:
+              // lowercase `properties.location.*` and capitalized `properties.Location["Business Name"/...]`.
+              // The remaining variants below (locationInfo, placeVisit-style nesting, top-level
+              // properties.name/props.title as name fallbacks) are UNCONFIRMED guesses at other
+              // Takeout format-version/locale layouts — kept because they're cheap to try and can
+              // only help, not because they're verified against a real sample.
+              const loc = props.location || props.Location || props.locationInfo || {}
+              let lat = null, lng = null
+              if (Array.isArray(f?.geometry?.coordinates) && f.geometry.coordinates.length >= 2) {
+                lng = Number(f.geometry.coordinates[0]); lat = Number(f.geometry.coordinates[1])
+              } else {
+                const geo = loc.geo_coordinates || loc['Geo Coordinates'] || loc.geoCoordinates || {}
+                lat = Number(geo.latitude ?? geo.Latitude ?? geo.lat)
+                lng = Number(geo.longitude ?? geo.Longitude ?? geo.lng)
+              }
+              if (!Number.isFinite(lat) || !Number.isFinite(lng)) { skippedNoCoords++; continue }
+              const name = loc.name || loc['Business Name'] || loc.businessName || props.name || props.Title || props.title || null
+              const address = loc.address || loc.Address || loc.formattedAddress || null
+              const rawDate = props.date || props.Date || props.Published || props.published || null
+              const date = rawDate ? String(rawDate).slice(0, 10) : null
+              places.push({
+                name: name || address || 'Saved place',
+                lat, lng,
+                address: address || null,
+                date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null,
+              })
+            } catch (_e) { skippedMalformed++ }
             if (places.length >= 1000) break
           }
-          return { places, totalFeatures: features.length }
+          const notices = []
+          if (skippedNoCoords) notices.push({ level: 'warn', message: `Skipped ${skippedNoCoords} saved place(s) with no recognizable coordinates` })
+          if (skippedMalformed) notices.push({ level: 'warn', message: `Skipped ${skippedMalformed} saved place(s) with an unrecognized/malformed format` })
+          return { places, totalFeatures: features.length, notices }
         })
         return safeJson(200, result)
       },
@@ -1165,24 +1365,51 @@ module.exports = definePlugin({
           const jsonStr = rawText.substring(rawText.indexOf('\n') + 1)
           let listData
           try { listData = JSON.parse(jsonStr) } catch (_e) { throw new Error('Could not parse the response from Google Maps') }
-          const meta = listData && listData[0]
+          const meta = Array.isArray(listData) ? listData[0] : null
           if (!meta) throw new Error('Invalid list data received from Google Maps')
-          const listName = meta[4] || 'Google Maps List'
-          const items = meta[8]
+          const listName = (Array.isArray(meta) && meta[4]) || 'Google Maps List'
+          const items = Array.isArray(meta) ? meta[8] : null
           if (!Array.isArray(items) || !items.length) throw new Error('That list is empty or could not be read')
           const places = []
+          let skippedNoCoords = 0
+          let skippedNoFtid = 0
+          let skippedMalformed = 0
+          // The `[8]`/`item[1][5][2]`/`item[1][5][3]` indices below are empirically reverse-engineered
+          // (see CLAUDE.md) against one real response shape, with no guarantee Google's undocumented
+          // endpoint keeps that shape stable. Every item is parsed defensively so a shape drift (a
+          // shifted index, a missing nested array) degrades to "fewer places extracted", not a
+          // hard failure of the whole route.
           for (const item of items) {
-            const coords = item && item[1] && item[1][5]
-            const lat = coords && coords[2]
-            const lng = coords && coords[3]
-            const name = item && item[2]
-            const notes = (item && item[3]) || null
-            if (name && typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
-              places.push({ name, lat, lng, notes, googleFtid: googleMapsFeatureIdFromItem(item) })
-            }
+            try {
+              if (!Array.isArray(item)) { skippedMalformed++; continue }
+              const inner = Array.isArray(item[1]) ? item[1] : null
+              const coords = inner && Array.isArray(inner[5]) ? inner[5] : null
+              const lat = coords ? coords[2] : null
+              const lng = coords ? coords[3] : null
+              const name = item[2]
+              const notes = item[3] || null
+              if (!(name && typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng))) {
+                skippedNoCoords++
+                continue
+              }
+              let googleFtid = null
+              try { googleFtid = googleMapsFeatureIdFromItem(item) } catch (_e2) { googleFtid = null }
+              if (!googleFtid) skippedNoFtid++
+              places.push({ name, lat, lng, notes, googleFtid })
+            } catch (_e) { skippedMalformed++ }
           }
           if (!places.length) throw new Error('No places with coordinates found in that list')
-          return { places, listName }
+          const notices = []
+          // `!4i500` in the request requests at most 500 items in this single (unpaginated) call —
+          // if the list actually has more, there's no way to fetch the rest and they're silently
+          // dropped. There's no total-count field in this undocumented response to compare against,
+          // so items.length hitting exactly the requested cap is the only available signal that
+          // truncation may have happened.
+          if (items.length >= 500) notices.push({ level: 'warn', message: `This list returned exactly 500 items — if it actually has more than 500 saved places, the rest could not be fetched (a hard limit for this import)` })
+          if (skippedNoCoords) notices.push({ level: 'warn', message: `Skipped ${skippedNoCoords} list item(s) with no recognizable name/coordinates` })
+          if (skippedMalformed) notices.push({ level: 'warn', message: `Skipped ${skippedMalformed} list item(s) with an unrecognized/malformed format` })
+          if (skippedNoFtid) notices.push({ level: 'warn', message: `Could not extract a Google feature ID for ${skippedNoFtid} place(s) (place was still imported)` })
+          return { places, listName, notices }
         })
         return safeJson(200, result)
       },
@@ -1245,16 +1472,224 @@ module.exports = definePlugin({
           if (!allItems.length) throw new Error('That list is empty or could not be read')
 
           const places = []
+          let skippedNoCoords = 0
+          let skippedMalformed = 0
           for (const item of allItems) {
-            const lat = Number(item?.py)
-            const lng = Number(item?.px)
-            const name = (typeof item?.name === 'string' && item.name.trim()) || (typeof item?.displayName === 'string' && item.displayName.trim()) || ''
-            const notes = (typeof item?.memo === 'string' && item.memo.trim()) || null
-            const address = (typeof item?.address === 'string' && item.address.trim()) || null
-            if (name && Number.isFinite(lat) && Number.isFinite(lng)) places.push({ name, lat, lng, notes, address })
+            try {
+              const lat = Number(item?.py)
+              const lng = Number(item?.px)
+              const name = (typeof item?.name === 'string' && item.name.trim()) || (typeof item?.displayName === 'string' && item.displayName.trim()) || ''
+              const notes = (typeof item?.memo === 'string' && item.memo.trim()) || null
+              const address = (typeof item?.address === 'string' && item.address.trim()) || null
+              if (name && Number.isFinite(lat) && Number.isFinite(lng)) places.push({ name, lat, lng, notes, address })
+              else skippedNoCoords++
+            } catch (_e) { skippedMalformed++ }
           }
           if (!places.length) throw new Error('No places with coordinates found in that list')
-          return { places, listName }
+          const notices = []
+          // Unlike the windowed-pagination pattern used elsewhere in this plugin (steps/bookings/
+          // expenses/places all resume across multiple /import rounds), this loop fetches
+          // everything in one route call and hard-stops at 500 total bookmarks as a time-budget
+          // bound — any bookmark beyond the 500th is dropped for good, not deferred to a later
+          // round. Per CLAUDE.md's "no silent caps" guidance, that must be visible.
+          if (totalCount > 500) notices.push({ level: 'warn', message: `This list has ${totalCount} saved places — only the first 500 were fetched (a hard limit for this import), so ${totalCount - 500} were not imported` })
+          if (skippedNoCoords) notices.push({ level: 'warn', message: `Skipped ${skippedNoCoords} bookmark(s) with no recognizable name/coordinates` })
+          if (skippedMalformed) notices.push({ level: 'warn', message: `Skipped ${skippedMalformed} bookmark(s) with an unrecognized/malformed format` })
+          return { places, listName, notices }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Import a shared Wanderlog trip plan link ──────────────────────────────
+    // UNCONFIRMED against a real Wanderlog response — no live sample was available to verify
+    // against; this is built from knowing that a sibling plugin (danl12353231/TREK-Wanderlog-plugin)
+    // hits the same unofficial public endpoint (`GET wanderlog.com/api/tripPlans/{key}?clientSchemaVersion=2`)
+    // directly from a pasted share link/key, the same "unofficial public endpoint, no official API"
+    // pattern this plugin already uses for /parse-google-list and /parse-naver-list — modeled on
+    // that code's structure and conventions (server-side fetch, since a plugin's client-side fetch
+    // can't reach an arbitrary egress host — CORS/egress, same reasoning as those routes). Every
+    // field access below is defensive (optional chaining, multiple plausible field-name guesses
+    // per concept, per-item try/catch skipping rather than throwing) exactly like
+    // /parse-google-places already does for Takeout format-version drift, and every skip/guess is
+    // surfaced via `notices` rather than silently dropped. Needs real-world testing against an
+    // actual Wanderlog share link/response to confirm or correct every field name guessed here.
+    {
+      method: 'POST', path: '/parse-wanderlog', auth: true,
+      async handler(req, ctx) {
+        const input = req.body?.link
+        const result = await tryAttempt(async () => {
+          if (!input || typeof input !== 'string' || !input.trim()) throw new Error('No link or trip key provided')
+          const trimmed = input.trim()
+          let key = null
+          if (!/^https?:\/\//i.test(trimmed) && !trimmed.includes('/') && /^[A-Za-z0-9_-]+$/.test(trimmed)) {
+            // Looks like a bare key already (no protocol, no slashes) — use it directly.
+            key = trimmed
+          } else {
+            // Plausible Wanderlog share-URL shapes — UNCONFIRMED, since no real link was available
+            // to check against. Tried in order, first match wins; a plugin can't verify these at
+            // authoring time so this is deliberately generous rather than narrowly exact.
+            const patterns = [
+              /wanderlog\.com\/view\/[^/?#]+\/([A-Za-z0-9_-]+)/i,
+              /wanderlog\.com\/edit\/[^/?#]+\/([A-Za-z0-9_-]+)/i,
+              /wanderlog\.com\/list\/[^/?#]+\/([A-Za-z0-9_-]+)/i,
+              /wanderlog\.com\/[^?#]*[?&]tripId=([A-Za-z0-9_-]+)/i,
+              /wanderlog\.com\/[^/?#]+\/[^/?#]+\/([A-Za-z0-9_-]{6,})(?:[/?#]|$)/i,
+            ]
+            for (const re of patterns) {
+              const m = trimmed.match(re)
+              if (m) { key = m[1]; break }
+            }
+          }
+          if (!key) throw new Error('Could not find a trip key in that link — paste a Wanderlog trip share link, or the trip key itself')
+
+          const apiUrl = `https://wanderlog.com/api/tripPlans/${encodeURIComponent(key)}?clientSchemaVersion=2`
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 15000)
+          let res
+          try {
+            res = await fetch(apiUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                Accept: 'application/json',
+              },
+              signal: controller.signal,
+            })
+          } finally { clearTimeout(timeout) }
+          if (!res.ok) throw new Error('Wanderlog did not return trip data (the trip may be private, or the link/key is wrong)')
+          let data
+          try { data = await res.json() } catch (_e) { throw new Error('Could not parse the response from Wanderlog') }
+          const plan = data?.tripPlan || data?.trip || data
+          if (!plan || typeof plan !== 'object') throw new Error('Invalid trip data received from Wanderlog')
+
+          const notices = []
+          const title = plan.title || plan.name || plan.tripName || null
+          const startDate = normalizeDateStr(plan.startDate || plan.start_date || plan.fromDate || null)
+          const endDate = normalizeDateStr(plan.endDate || plan.end_date || plan.toDate || null)
+          // Confirmed against a real /api/tripPlans/<key> response: currency lives at
+          // itinerary.budget.amount.currencyCode, not a top-level plan.currency field.
+          const currency = plan.itinerary?.budget?.amount?.currencyCode || plan.currency || plan.currencyCode || null
+
+          // Places: CONFIRMED shape (fetched and inspected a real trip plan directly) —
+          // Wanderlog's itinerary is NOT grouped by calendar day the way the original guess
+          // assumed. It's `plan.itinerary.sections[]`, each a named group (e.g. "Tokyo
+          // attractions") with a `blocks[]` array; a block is a place only when
+          // `block.type === 'place'`, holding the actual data under `block.place` in Google
+          // Places API shape: `place.geometry.location.{lat,lng}`, `place.formatted_address`
+          // (snake_case, not `formattedAddress`), `place.name`. Other observed block types are
+          // `checklist` and `note` — not places, skipped. No per-block/per-section date field
+          // was present on the one real trip inspected (a "guide"-style trip with no day-by-day
+          // planning — startDate/endDate/days were all null on that trip too), so `date` stays
+          // null unless a section/block-level date does turn up on some other trip's response;
+          // still checked defensively below in case a day-planned trip shapes it differently.
+          // Each place already carries its own distinct name (like every Collection-mode
+          // source), so these are NOT proximity-clustered client-side the way anonymous GPS
+          // pings are — clustering would wrongly merge two differently-named stops that happen
+          // to sit close together (e.g. two restaurants across the street from each other).
+          const places = []
+          let skippedNoCoords = 0, skippedMalformed = 0
+          const sections = Array.isArray(plan.itinerary?.sections) ? plan.itinerary.sections : []
+          for (const section of sections) {
+            try {
+              const sectionDate = normalizeDateStr(section?.date || section?.day || null)
+              const blocks = Array.isArray(section?.blocks) ? section.blocks : []
+              for (const block of blocks) {
+                if (block?.type !== 'place' || !block?.place) continue
+                try {
+                  const p = block.place
+                  const lat = Number(p?.geometry?.location?.lat ?? p?.lat ?? p?.latitude ?? p?.location?.lat)
+                  const lng = Number(p?.geometry?.location?.lng ?? p?.lng ?? p?.longitude ?? p?.location?.lng)
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) { skippedNoCoords++; continue }
+                  const name = p?.name || p?.title || null
+                  const address = p?.formatted_address || p?.address || p?.formattedAddress || null
+                  const blockDate = normalizeDateStr(block?.date || null)
+                  places.push({
+                    name: name || address || 'Wanderlog place', lat, lng,
+                    address: address || null,
+                    notes: section?.heading || null,
+                    date: blockDate || sectionDate || null,
+                  })
+                } catch (_e) { skippedMalformed++ }
+                if (places.length >= 1000) break
+              }
+            } catch (_e) { skippedMalformed++ }
+            if (places.length >= 1000) break
+          }
+          // Fallback: a flat top-level places array, for any response shape that isn't the
+          // sections/blocks structure confirmed above (e.g. a future schema version).
+          if (!places.length) {
+            const flat = plan.places || plan.savedPlaces || plan.optimize?.places || []
+            if (Array.isArray(flat)) {
+              for (const p of flat) {
+                try {
+                  const lat = Number(p?.geometry?.location?.lat ?? p?.lat ?? p?.latitude ?? p?.location?.lat)
+                  const lng = Number(p?.geometry?.location?.lng ?? p?.lng ?? p?.longitude ?? p?.location?.lng)
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) { skippedNoCoords++; continue }
+                  const name = p?.name || p?.title || null
+                  places.push({ name: name || 'Wanderlog place', lat, lng, address: p?.formatted_address || p?.address || null, notes: p?.notes || null, date: null })
+                } catch (_e) { skippedMalformed++ }
+                if (places.length >= 1000) break
+              }
+              if (places.length) notices.push({ level: 'warn', message: 'Used a flat places list fallback — this response shape was not the confirmed sections/blocks structure' })
+            }
+          }
+
+          // Bookings: reservations/flights/hotels, mapped into this plugin's existing flat booking
+          // shape (matching parseBookingsRegex's own field names exactly, since /import's bookings
+          // section consumes that shape as-is regardless of which route produced it).
+          const bookings = []
+          let skippedBookingMalformed = 0
+          const resList = plan.reservations || plan.bookings || plan.flights || []
+          if (Array.isArray(resList)) {
+            resList.forEach((r, i) => {
+              try {
+                const kind = String(r?.type || r?.reservationType || '').toLowerCase()
+                const isFlight = kind.includes('flight') || !!r?.flightNumber || !!r?.airline
+                const isHotel = !isFlight && (kind.includes('hotel') || kind.includes('lodging') || kind.includes('accommodation'))
+                if (isFlight) {
+                  bookings.push({
+                    _id: 'wf' + i, type: 'flight',
+                    title: r?.flightNumber ? ('Flight ' + r.flightNumber) : (r?.title || 'Flight'),
+                    from: r?.departureAirport || r?.from || null, from_code: r?.departureAirportCode || null,
+                    from_date: normalizeDateStr(r?.departureDate || r?.startDate || null), from_time: r?.departureTime || null,
+                    to: r?.arrivalAirport || r?.to || null, to_code: r?.arrivalAirportCode || null,
+                    to_date: normalizeDateStr(r?.arrivalDate || r?.endDate || null), to_time: r?.arrivalTime || null,
+                    operator: r?.airline || null, flight_number: r?.flightNumber || null,
+                    booking_ref: r?.confirmationNumber || r?.bookingRef || null,
+                    price: typeof r?.price === 'number' ? r.price : (typeof r?.cost === 'number' ? r.cost : null),
+                    currency: r?.currency || currency || null,
+                    notes: r?.notes || null, confidence: 'medium', _source: 'wanderlog',
+                  })
+                } else if (isHotel) {
+                  bookings.push({
+                    _id: 'wh' + i, type: 'hotel',
+                    title: r?.name || r?.title || 'Hotel booking',
+                    from: null, from_date: normalizeDateStr(r?.checkIn || r?.startDate || null),
+                    to: null, to_date: normalizeDateStr(r?.checkOut || r?.endDate || null),
+                    operator: r?.name || null,
+                    booking_ref: r?.confirmationNumber || r?.bookingRef || null,
+                    price: typeof r?.price === 'number' ? r.price : (typeof r?.cost === 'number' ? r.cost : null),
+                    currency: r?.currency || currency || null,
+                    notes: r?.notes || null, confidence: 'medium', _source: 'wanderlog',
+                  })
+                } else {
+                  skippedBookingMalformed++
+                }
+              } catch (_e) { skippedBookingMalformed++ }
+            })
+          }
+
+          if (skippedNoCoords) notices.push({ level: 'warn', message: `Skipped ${skippedNoCoords} place(s) with no recognizable coordinates` })
+          if (skippedMalformed) notices.push({ level: 'warn', message: `Skipped ${skippedMalformed} place(s) with an unrecognized/malformed format` })
+          if (skippedBookingMalformed) notices.push({ level: 'warn', message: `Skipped ${skippedBookingMalformed} reservation(s) not recognized as a flight or hotel` })
+          // Places mapping (sections[].blocks[].place, Google Places API shape) is now CONFIRMED
+          // against a real trip plan response. Reservations/flights/hotels are still a guess —
+          // the one real trip inspected had none (showReservations: false on its TripPlanKeys
+          // entry, itinerary.journal.stops: []), so this still needs a real day-planned trip
+          // with actual bookings to verify or correct.
+          notices.push({ level: 'warn', message: 'Wanderlog flight/hotel booking mapping is still best-effort and UNCONFIRMED — no real trip with bookings was available to verify against. Places/dates are confirmed against a real response.' })
+
+          return { title, startDate, endDate, currency, places, bookings, notices }
         })
         return safeJson(200, result)
       },
@@ -1309,17 +1744,17 @@ module.exports = definePlugin({
           }
 
           const placesArr = Array.isArray(places) ? places : []
-          // Same offset/total pagination pattern as /import's steps/bookings/expenses/places —
-          // a large saved-places export is windowed by the client, this just re-bases the
+          // Same pagination pattern as /import's steps/bookings/expenses/places — a large
+          // saved-places export is windowed by the client; paginatedWindow() re-bases the
           // received slice back onto the correct global index.
-          const offset = placesOffset || 0
-          const total = totalPlaces ?? (offset + placesArr.length)
+          const win = paginatedWindow(placesArr, placesOffset, totalPlaces)
+          const total = win.total
 
           if (p.places < total) {
             let i = p.places
-            for (; i < offset + placesArr.length; i++) {
+            for (; i < win.end; i++) {
               if (!withinBudget()) break
-              const place = placesArr[i - offset]
+              const place = win.get(i)
               try {
                 let name = place.name || null
                 // A generic fallback name (from the parser, when the source had none) is worth
@@ -1433,11 +1868,12 @@ module.exports = definePlugin({
           if (options?.journalOnly) {
             const steps = polarsteps?.steps || []
             // steps here is whatever slice the client sent this round (see importOneTarget()'s
-            // STEPS_PER_ROUND windowing) — _stepOffset/_totalSteps carry the true position/count
-            // across the whole paginated step list. Absent (an unpaginated call, or no
-            // polarsteps at all) defaults to "this is the whole list starting at 0".
-            const stepOffset = polarsteps?._stepOffset || 0
-            const totalSteps = polarsteps?._totalSteps ?? (stepOffset + steps.length)
+            // STEPS_PER_ROUND windowing) — polarsteps._stepOffset/_totalSteps carry the true
+            // position/count across the whole paginated step list; paginatedWindow() re-bases
+            // them. Absent (an unpaginated call, or no polarsteps at all) defaults to "this is
+            // the whole list starting at 0".
+            const stepsWin = paginatedWindow(steps, polarsteps?._stepOffset, polarsteps?._totalSteps)
+            const totalSteps = stepsWin.total
             if (!polarsteps || !options?.importJournal) {
               // Must mark done — otherwise the client's resumable loop (which only stops on
               // progress.done) would keep resending this exact same no-op call up to its 200-round cap.
@@ -1470,13 +1906,12 @@ module.exports = definePlugin({
             }
             if (journeyId && p.journal < totalSteps) {
               // p.journal is a GLOBAL index across the whole (possibly paginated) step list;
-              // `steps` here is only this round's window, so it must be re-based by stepOffset
-              // on both the loop bound and the lookup — mirrors section 2's identical pattern
-              // below for the normal (non-journal-only) path.
+              // stepsWin re-bases it onto this round's local `steps` window — mirrors section
+              // 2's identical pattern below for the normal (non-journal-only) path.
               let i = p.journal
-              for (; i < stepOffset + steps.length; i++) {
+              for (; i < stepsWin.end; i++) {
                 if (!withinBudget()) break
-                const step = steps[i - stepOffset]
+                const step = stepsWin.get(i)
                 try {
                   const weatherNote = step.weather
                     ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
@@ -1585,11 +2020,12 @@ module.exports = definePlugin({
 
           const steps = polarsteps?.steps || []
           // steps is whatever slice the client sent this round (see importOneTarget()'s
-          // STEPS_PER_ROUND windowing in client/index.html) — _stepOffset/_totalSteps carry the
-          // true position/count across the whole paginated step list. Absent (an unpaginated
-          // call, or no polarsteps at all) defaults to "this is the whole list starting at 0".
-          const stepOffset = polarsteps?._stepOffset || 0
-          const totalSteps = polarsteps?._totalSteps ?? (stepOffset + steps.length)
+          // STEPS_PER_ROUND windowing in client/index.html) — polarsteps._stepOffset/_totalSteps
+          // carry the true position/count across the whole paginated step list; paginatedWindow()
+          // re-bases them. Absent (an unpaginated call, or no polarsteps at all) defaults to
+          // "this is the whole list starting at 0".
+          const stepsWin = paginatedWindow(steps, polarsteps?._stepOffset, polarsteps?._totalSteps)
+          const totalSteps = stepsWin.total
 
           // ── 1.5. Ensure day rows exist for the trip's date range ──────────
           // Nothing in this plugin (or, per available docs, TREK itself) auto-creates day rows
@@ -1620,7 +2056,7 @@ module.exports = definePlugin({
             // of only falling back — see the original 1.6.4 fix notes in CLAUDE.md.
             //
             // Caveat now that `steps` can be a per-round PAGE rather than the full list (see
-            // stepOffset/totalSteps above): this only sees the current page's step dates, so a
+            // stepsWin above): this only sees the current page's step dates, so a
             // narrow first page could under-extend the range for a large paginated trip. The
             // client's own date-range computation (prepareStep3()/importOneTarget(), run
             // against the FULL in-memory arrays before this loop starts) is the real fix for
@@ -1729,9 +2165,9 @@ module.exports = definePlugin({
               }
               if (journeyId) {
                 let i = p.journal
-                for (; i < stepOffset + steps.length; i++) {
+                for (; i < stepsWin.end; i++) {
                   if (!withinBudget()) break
-                  const step = steps[i - stepOffset]
+                  const step = stepsWin.get(i)
                   try {
                     // Reverse geocode if no name
                     let placeName = step.location?.name || step.name
@@ -1848,7 +2284,7 @@ module.exports = definePlugin({
           // client (or any caller that doesn't pre-cluster) still works.
           let clusters = []
           let totalClusters = 0
-          const clusterOffset = placesOffset || 0
+          let clustersWin = null
           if (options?.importPlaces) {
             if (Array.isArray(placesIn) && totalPlaces != null) {
               clusters = placesIn
@@ -1860,12 +2296,13 @@ module.exports = definePlugin({
               clusters = clusterByProximity(deduplicated, 800)
               totalClusters = clusters.length
             }
+            clustersWin = paginatedWindow(clusters, placesOffset, totalClusters)
 
             if (p.places < totalClusters) {
               let i = p.places
-              for (; i < clusterOffset + clusters.length; i++) {
+              for (; i < clustersWin.end; i++) {
                 if (!withinBudget()) break
-                const cluster = clusters[i - clusterOffset]
+                const cluster = clustersWin.get(i)
                 try {
                   // Reverse geocode for a real place name
                   let name = cluster.name || null
@@ -1908,18 +2345,18 @@ module.exports = definePlugin({
           // derives the reservation's day from this, no day_id needed.
           const combineDateTime = (date, time) => date ? (date + (time ? 'T' + time : '')) : (time || null)
 
-          // totalBookings/bookingsOffset: same pagination pattern as polarsteps.steps — a large
-          // bookings array (many PDF/ICS/email confirmations) can push the request past the
-          // ~100KB proxy ceiling on its own. Falls back to the plain array length when absent
+          // Same pagination pattern as polarsteps.steps — a large bookings array (many PDF/ICS/
+          // email confirmations) can push the request past the ~100KB proxy ceiling on its own.
+          // paginatedWindow() falls back to the plain array length when offset/total are absent
           // (an unpaginated call sends everything, offset 0).
-          const totalBookingsCount = totalBookings ?? (bookings?.length || 0)
-          const bookingOffset = bookingsOffset || 0
+          const bookingsWin = paginatedWindow(bookings, bookingsOffset, totalBookings)
+          const totalBookingsCount = bookingsWin.total
           const bookingsActive = !!(options?.importBookings && totalBookingsCount)
           if (bookingsActive && p.bookings < totalBookingsCount) {
             let i = p.bookings
-            for (; i < bookingOffset + (bookings?.length || 0); i++) {
+            for (; i < bookingsWin.end; i++) {
               if (!withinBudget()) break
-              const b = bookings[i - bookingOffset]
+              const b = bookingsWin.get(i)
               try {
                 await sleep(150)
                 if (b.type === 'hotel') {
@@ -1991,16 +2428,16 @@ module.exports = definePlugin({
           }
 
           // ── 6. Costs ──────────────────────────────────────────────────────
-          // totalExpenses/expensesOffset: same pagination pattern as bookings/steps above — a
-          // large expense CSV can push the request past the ~100KB proxy ceiling on its own.
-          const totalExpensesCount = totalExpenses ?? (expenses?.length || 0)
-          const expenseOffset = expensesOffset || 0
+          // Same pagination pattern as bookings/steps above — a large expense CSV can push the
+          // request past the ~100KB proxy ceiling on its own.
+          const expensesWin = paginatedWindow(expenses, expensesOffset, totalExpenses)
+          const totalExpensesCount = expensesWin.total
           const costsActive = !!(options?.importCosts && totalExpensesCount)
           if (costsActive && p.costs < totalExpensesCount) {
             let i = p.costs
-            for (; i < expenseOffset + (expenses?.length || 0); i++) {
+            for (; i < expensesWin.end; i++) {
               if (!withinBudget()) break
-              const e = expenses[i - expenseOffset]
+              const e = expensesWin.get(i)
               try {
                 if (!e.amount || !e.name) continue
                 const cost = await ctx.costs.create(tripId, {
