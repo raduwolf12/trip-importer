@@ -1106,8 +1106,11 @@ function updateDropHint(){
 // A small trip still goes through in one call, unchanged. Returns the same shape
 // /parse-polarsteps always returned, or null (pushing a message onto jsonWarnings) on failure.
 async function parsePolarstepsSmart(text,filename,jsonWarnings){
-  var SINGLE_SHOT_MAX=150000; // conservative margin under the ~270KB confirmed failure point —
-  // the exact real ceiling isn't known, only that 270KB fails and this needs to stay well clear.
+  var SINGLE_SHOT_MAX=60000; // the plugin-route proxy's real body-size ceiling is a confirmed
+  // ~100KB (express.json({limit:'100kb'}) on the whole request, not just this field) — 150000
+  // chars was a stale guess from before that was confirmed, and let trip.json files as small as
+  // ~145KB (well under the old 270KB "confirmed failure point") slip into the single-shot path
+  // and 413. Kept well under 100KB, matching CHUNK_TARGET_BYTES below.
   var CHUNK_TARGET_BYTES=60000;
   if(text.length<=SINGLE_SHOT_MAX){
     try{
@@ -1371,6 +1374,25 @@ async function doAnalyze(){
   // its own trip at import time (computeTripTargets()), auto-scoped to its own dates — see
   // the "Polarsteps multi-journey" note in CLAUDE.md.
   if(polarstepsList.length>0){
+    // De-dupe journeys before offering them in the picker. The same trip.json commonly ends up
+    // in jsonFiles twice with no shared filename to catch it via the name-based file-drop guard
+    // (e.g. a user drops both export.zip AND the already-extracted folder from that same zip, or
+    // a multi-trip array file that happens to repeat an entry) — every trip.json found inside a
+    // dropped zip is pushed into jsonFiles independently of top-level .json drops, so nothing
+    // upstream of this point ever compares parsed *content*. Without this, both parses were
+    // offered pre-checked in step 2 and, unless the user manually noticed and unchecked one,
+    // both got imported as separate trips — the only backstop was a server-side uuid check that
+    // fires mid-import (a dismissible confirm() dialog) rather than preventing the duplicate at
+    // parse time, and is skipped entirely when uuid is falsy.
+    var dedupedList=[],seenKeys={};
+    polarstepsList.forEach(function(p){
+      var key=p.uuid?('uuid:'+p.uuid):('meta:'+p.name+'|'+p.startDate+'|'+p.endDate+'|'+p.stepCount);
+      if(seenKeys[key])return;
+      seenKeys[key]=true;
+      dedupedList.push(p);
+    });
+    if(dedupedList.length<polarstepsList.length)console.log('[trip-importer] dropped',polarstepsList.length-dedupedList.length,'duplicate Polarsteps journey parse(s)');
+    polarstepsList=dedupedList;
     parsed.polarsteps=polarstepsList[0];
     parsed.polarstepsAll=polarstepsList;
     parsed._selectedJourneyIdx=polarstepsList.map(function(_,i){return i;});
