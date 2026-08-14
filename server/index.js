@@ -263,11 +263,12 @@ function clusterByProximity(places, radiusMetres = 800) {
     if (match) {
       match.members.push(p)
       if (!match.date && p.date) match.date = p.date
+      if (!match.notes && p.notes) match.notes = p.notes
       // Update centroid
       match.lat = match.members.reduce((s, m) => s + m.lat, 0) / match.members.length
       match.lng = match.members.reduce((s, m) => s + m.lng, 0) / match.members.length
     } else {
-      clusters.push({ lat: p.lat, lng: p.lng, members: [p], name: p.name, date: p.date })
+      clusters.push({ lat: p.lat, lng: p.lng, members: [p], name: p.name, date: p.date, notes: p.notes || null })
     }
   }
   return clusters
@@ -749,7 +750,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.2.5 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.3.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1340,7 +1341,14 @@ module.exports = definePlugin({
                   lat: place.lat,
                   lng: place.lng,
                   address: place.address || null,
-                  notes: place.notes || null,
+                  // TREK's own Collections UI (CollectionPlaceDetail.tsx) only ever renders
+                  // `description` (as markdown) — `notes` is a real, schema-accepted field but is
+                  // never displayed anywhere for collection places (unlike trip places, where
+                  // notes DOES show up in PlaceInspector/PlaceFormModal). Every parser that feeds
+                  // Collection mode (KML, CSV, Google Takeout, Google/Naver list) produces this
+                  // text under `notes` — send it ONLY as `description` (not also `notes`) so it's
+                  // actually visible without writing a duplicate copy nothing here displays.
+                  description: place.notes || null,
                   google_ftid: place.googleFtid || undefined,
                 })
                 if (saveRes?.duplicate) {
@@ -1459,7 +1467,6 @@ module.exports = definePlugin({
                       entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
                       title: 'Trip overview',
                       story: polarsteps.summary,
-                      content: polarsteps.summary,
                     })
                     p.journalEntries++
                     const introId = introRes?.id ?? introRes?.data?.id
@@ -1485,7 +1492,7 @@ module.exports = definePlugin({
                   const entryWeather = mapPolarstepsWeather(step.weather?.condition)
                   const entryLocation = mapPolarstepsEntryLocation(step)
                   const entryRes = await ctx.journal.createEntry(journeyId, {
-                    entry_date: entryDate, title: step.name, story: (step.description || '') + weatherNote, content: (step.description || '') + weatherNote,
+                    entry_date: entryDate, title: step.name, story: (step.description || '') + weatherNote,
                     weather: entryWeather,
                     ...entryLocation,
                   })
@@ -1719,7 +1726,6 @@ module.exports = definePlugin({
                       entry_date: polarsteps.startDate || (steps[0] && steps[0].date) || null,
                       title: 'Trip overview',
                       story: polarsteps.summary,
-                      content: polarsteps.summary,
                     })
                     p.journalEntries++
                     const introId = introRes?.id ?? introRes?.data?.id
@@ -1771,7 +1777,7 @@ module.exports = definePlugin({
                     const entryWeather = mapPolarstepsWeather(step.weather?.condition)
                     const entryLocation = mapPolarstepsEntryLocation(step, placeName)
 
-                    const entry = { entry_date: entryDate, title: step.name, story: entryContent, content: entryContent, weather: entryWeather, ...entryLocation }
+                    const entry = { entry_date: entryDate, title: step.name, story: entryContent, weather: entryWeather, ...entryLocation }
                     if (placeId) entry.place_id = placeId
                     const entryRes = await ctx.journal.createEntry(journeyId, entry)
                     p.journalEntries++
@@ -1812,8 +1818,12 @@ module.exports = definePlugin({
                     // Also add to day notes if day exists for this date
                     if (options.importDayNotes && entryDate && dayMap[entryDate] && step.description) {
                       try {
+                        // The host's rpc-host.ts hard-requires `input.text` (throws BadParams
+                        // otherwise, which the try/catch here was silently swallowing) — `content`
+                        // is not a real daynotes field at all, so every Polarsteps day-note import
+                        // has always failed silently despite importDayNotes being enabled/reported.
                         const noteRes = await ctx.daynotes.create(tripId, dayMap[entryDate], {
-                          content: '**' + step.name + '**\n' + step.description,
+                          text: '**' + step.name + '**\n' + step.description,
                         })
                         p.journalDayNotes++
                         const noteId = noteRes?.id ?? noteRes?.data?.id
@@ -1877,7 +1887,12 @@ module.exports = definePlugin({
                   }
                   name = name || ('Location ' + (cluster.date || ''))
 
-                  const place = await ctx.places.create(tripId, { name, lat: cluster.lat, lng: cluster.lng })
+                  // cluster.notes comes from KML/GPX placemark descriptions (Google MyMaps
+                  // exports, etc.) — GPS-photo/timeline clusters never carry a `notes` value, so
+                  // this is a no-op for those. Sent ONLY as `description`, not also `notes` —
+                  // TREK's PlaceInspector renders both fields for trip places, so sending the
+                  // same text to both showed it twice; `description` alone is enough.
+                  const place = await ctx.places.create(tripId, { name, lat: cluster.lat, lng: cluster.lng, description: cluster.notes || undefined })
                   p.placesCreated++
 
                   // Assign to day if date known
@@ -2003,12 +2018,18 @@ module.exports = definePlugin({
               const e = expenses[i - expenseOffset]
               try {
                 if (!e.amount || !e.name) continue
+                // TREK's real budget_items schema (shared/src/budget/budget.schema.ts) has no
+                // `notes` field at all — the accepted field is singular `note`, plus a dedicated
+                // `expense_date` column. The old `notes: 'Date: '+e.date` was silently dropped by
+                // zod validation on every import (extra/unknown key), so no imported cost has ever
+                // actually carried its date — fixed by using the real `expense_date` field instead
+                // of stuffing it into a free-text note that didn't exist.
                 const cost = await ctx.costs.create(tripId, {
                   name: e.name,
                   total_price: e.amount,
                   currency: e.currency || options?.defaultCurrency || 'EUR',
                   category: e.category || 'other',
-                  notes: e.date ? 'Date: ' + e.date : null,
+                  expense_date: e.date || null,
                 })
                 p.costsCreated++
                 const costId = cost?.id ?? cost?.data?.id

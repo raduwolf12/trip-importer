@@ -1484,7 +1484,15 @@ async function doAnalyze(){
   parsed._pdfFiles=pdfFiles; // uploaded as file attachments after trip is created
   var bookingText='';
   for(var tf of txtFiles){
-    try{var t=await readText(tf);bookingText+='\n\n---'+tf.name+'---\n'+t.slice(0,4000);}catch(_e){}
+    try{
+      var t=await readText(tf);
+      // .eml is a MIME message, not plain text — a real HTML confirmation email's body is
+      // almost always Content-Transfer-Encoding: base64/quoted-printable, so reading the raw
+      // bytes gives mostly headers followed by base64 garbage extractEmlText() decodes the '
+      // MIME structure first; .txt files pass through as-is.
+      if(tf.name.toLowerCase().endsWith('.eml'))t=extractEmlText(t);
+      bookingText+='\n\n---'+tf.name+'---\n'+t.slice(0,4000);
+    }catch(_e){}
   }
   var pdfTextOk=0;
   if(pdfFiles.length){
@@ -1580,7 +1588,7 @@ async function doAnalyzeCollection(){
     try{
       var kmlText=kf._text||await readText(kf);
       var kmlPts=parseKMLText(kmlText);
-      kmlPts.forEach(function(p){parsedCollection.places.push({name:p.name,lat:p.lat,lng:p.lng,address:null,notes:null,date:p.date,_selected:true,_source:'KML'});});
+      kmlPts.forEach(function(p){parsedCollection.places.push({name:p.name,lat:p.lat,lng:p.lng,address:null,notes:p.notes||null,date:p.date,_selected:true,_source:'KML'});});
       if(!kmlPts.length)warnings.push(kf.name+': no placemarks with coordinates found');
     }catch(e){warnings.push(kf.name+': '+e.message);}
   }
@@ -2652,10 +2660,11 @@ function clusterByProximity(places,radiusMetres){
     if(match){
       match.members.push(p);
       if(!match.date&&p.date)match.date=p.date;
+      if(!match.notes&&p.notes)match.notes=p.notes;
       match.lat=match.members.reduce(function(s,m){return s+m.lat;},0)/match.members.length;
       match.lng=match.members.reduce(function(s,m){return s+m.lng;},0)/match.members.length;
     }else{
-      clusters.push({lat:p.lat,lng:p.lng,members:[p],name:p.name,date:p.date});
+      clusters.push({lat:p.lat,lng:p.lng,members:[p],name:p.name,date:p.date,notes:p.notes||null});
     }
   }
   return clusters;
@@ -3179,6 +3188,16 @@ function parseKMLText(text){
     Array.prototype.forEach.call(doc.querySelectorAll('Placemark'),function(pm){
       var nameEl=pm.querySelector('name');
       var name=nameEl?nameEl.textContent.trim():null;
+      var descEl=pm.querySelector('description');
+      // Google MyMaps exports the note/URL fields into <description> as CDATA HTML
+      // (e.g. "URL: https://...<br>Notitie: https://...<br>Labels: <br>Reactie: ") — strip
+      // tags and collapse <br> to newlines so it's readable as a plain-text collection note,
+      // rather than silently dropping it (the original bug: description was parsed nowhere).
+      var desc=null;
+      if(descEl&&descEl.textContent){
+        desc=descEl.textContent.replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]+>/g,'').trim();
+        if(!desc)desc=null;
+      }
       var whenEl=pm.querySelector('TimeStamp when, TimeSpan begin');
       var date=whenEl&&whenEl.textContent?whenEl.textContent.slice(0,10):null;
       var coordEl=pm.querySelector('Point coordinates, LineString coordinates, Polygon coordinates, coordinates');
@@ -3189,10 +3208,92 @@ function parseKMLText(text){
       var parts=first.split(',');
       var lon=parseFloat(parts[0]),lat=parseFloat(parts[1]);
       if(isNaN(lat)||isNaN(lon))return;
-      points.push({lat:lat,lng:lon,date:date,name:name});
+      points.push({lat:lat,lng:lon,date:date,name:name,notes:desc});
     });
   }catch(_e){}
   return points;
+}
+
+// ── .eml (MIME message) text extraction ─────────────────────────────────────
+// A .eml file is a MIME message, not plain text/HTML — this parses just enough MIME structure
+// (headers, multipart boundaries, Content-Transfer-Encoding) to recover the actual readable
+// body, instead of feeding raw base64/quoted-printable bytes to the regex/AI booking pipeline.
+function decodeQuotedPrintable(str){
+  return str.replace(/=\r?\n/g,'').replace(/=([0-9A-Fa-f]{2})/g,function(_m,hex){return String.fromCharCode(parseInt(hex,16));});
+}
+function decodeBase64Loose(str){
+  try{return atob(str.replace(/[^A-Za-z0-9+/=]/g,''));}catch(_e){return '';}
+}
+// Splits a raw message/part into {headers, body} — headers end at the first blank line.
+function splitMimePart(raw){
+  var idx=raw.search(/\r?\n\r?\n/);
+  if(idx===-1)return{headers:raw,body:''};
+  var m=raw.slice(idx).match(/^\r?\n\r?\n/);
+  return{headers:raw.slice(0,idx),body:raw.slice(idx+m[0].length)};
+}
+function parseMimeHeaders(headerText){
+  var h={};
+  // unfold header continuation lines (leading whitespace) before splitting
+  var unfolded=headerText.replace(/\r?\n[ \t]+/g,' ');
+  unfolded.split(/\r?\n/).forEach(function(line){
+    var m=line.match(/^([^:]+):\s*(.*)$/);
+    if(m)h[m[1].toLowerCase().trim()]=m[2].trim();
+  });
+  return h;
+}
+// Decodes one MIME body part's text according to its own headers, stripping HTML if needed.
+function decodeMimePartBody(headers,body){
+  var cte=(headers['content-transfer-encoding']||'').toLowerCase();
+  var ctype=(headers['content-type']||'text/plain').toLowerCase();
+  var text=body;
+  if(cte.indexOf('base64')!==-1)text=decodeBase64Loose(body);
+  else if(cte.indexOf('quoted-printable')!==-1)text=decodeQuotedPrintable(body);
+  if(ctype.indexOf('text/html')!==-1)text=stripHtmlTags(text);
+  return text;
+}
+function stripHtmlTags(html){
+  return html.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(p|div|tr|li|h[1-6])>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+}
+// Recursively walks a (possibly nested multipart) MIME part, returning the best available
+// text — preferring text/plain, falling back to (tag-stripped) text/html.
+function extractMimePartText(raw){
+  var split=splitMimePart(raw);
+  var headers=parseMimeHeaders(split.headers);
+  var ctypeRaw=headers['content-type']||'text/plain';
+  var ctype=ctypeRaw.toLowerCase();
+  // Boundary values are case-sensitive and commonly contain uppercase characters — must be
+  // pulled from the ORIGINAL-case header, not the lowercased `ctype` used for type matching.
+  var boundaryMatch=ctypeRaw.match(/boundary="?([^";]+)"?/i);
+  if(ctype.indexOf('multipart/')===0&&boundaryMatch){
+    var boundary=boundaryMatch[1];
+    var rawParts=split.body.split('--'+boundary);
+    var plain='',html='';
+    rawParts.forEach(function(rp){
+      if(!rp||rp.trim()==='--'||!rp.trim())return;
+      var innerSplit=splitMimePart(rp.replace(/^\r?\n/,''));
+      var innerHeaders=parseMimeHeaders(innerSplit.headers);
+      var innerType=(innerHeaders['content-type']||'').toLowerCase();
+      if(innerType.indexOf('multipart/')===0){
+        var nested=extractMimePartText(rp.replace(/^\r?\n/,''));
+        if(nested)plain=plain?plain:nested;
+      }else if(innerType.indexOf('text/plain')!==-1){
+        plain+=decodeMimePartBody(innerHeaders,innerSplit.body)+'\n';
+      }else if(innerType.indexOf('text/html')!==-1){
+        html+=decodeMimePartBody(innerHeaders,innerSplit.body)+'\n';
+      }
+    });
+    return (plain.trim()||html.trim());
+  }
+  return decodeMimePartBody(headers,split.body);
+}
+function extractEmlText(raw){
+  try{
+    var split=splitMimePart(raw);
+    var headers=parseMimeHeaders(split.headers);
+    var headerSummary=['from','to','subject','date'].map(function(k){return headers[k]?k+': '+headers[k]:'';}).filter(Boolean).join('\n');
+    var body=extractMimePartText(raw);
+    return (headerSummary?headerSummary+'\n\n':'')+(body||'');
+  }catch(_e){return raw;}
 }
 
 // ── File readers ────────────────────────────────────────────────────────────
