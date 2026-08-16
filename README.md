@@ -54,6 +54,12 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 - Imported photos attach to the trip's **Files** tab (optionally linked to a place) — TREK has no way for a plugin to attach a photo directly into a journal entry's own gallery; this is a platform limitation, not something this plugin can work around
 - **Collection mode**: the Google Maps "Saved places" export parser is best-effort against the general Takeout GeoJSON shape and hasn't been verified against a real export — if your file doesn't parse, please report it (with a sanitized sample if possible) so the parser can be adjusted; KML/KMZ and CSV place-list parsing reuse the same well-tested code paths as the trip importer's other sources
 - **Pasting a shared list link** (Google Maps or Naver Maps) uses the same undocumented internal endpoints TREK's own core "List Import" feature uses — it isn't an official API and could break if either service changes it; a single-*place* share link (as opposed to a *list*) isn't supported, since it carries no list to import — paste that into TREK's own place search instead
+- **GPS photos, GPX/KML tracks, and Google Maps Timeline exports** are all clustered into places entirely in your browser before anything is sent to the server — needed because the plugin-route proxy enforces a hard ~100KB request body limit, and any of these can easily produce a raw point list bigger than that for a large trip (a Timeline export in particular is routinely several MB)
+- **Booking text (PDFs/.txt/.eml), expense CSVs, and Google Maps "Saved places" exports** are windowed into several requests client-side (same ~60KB-per-call budget used elsewhere) instead of being sent whole, for the same reason
+
+## Known limitations
+
+- **TREK's plugin-route proxy caps every request body at ~100KB**, enforced before the plugin's own route handler runs — a request over that limit gets rejected with an HTTP 413 that **never reaches this plugin's own error handling or logs**, so the only visible symptom in the TREK UI is the import spinner never finishing. If an import seems to hang indefinitely rather than showing an error, this is the most likely cause. Every known source of this has now been windowed or moved client-side (see the Notes above) — if you still hit it, please report it with the file size/type involved.
 
 ## Permissions
 

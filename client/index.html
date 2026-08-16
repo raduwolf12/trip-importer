@@ -1318,11 +1318,14 @@ async function doAnalyze(){
       if(jf._isTimeline){
         // Google Maps timeline
         showSt1('Parsing Google Maps timeline…','');
-        var tlResult=await invoke('/parse-timeline','POST',{json:text});
-        if(tlResult&&tlResult.places&&tlResult.places.length){
-          parsed.timelinePlaces=tlResult.places;
-          console.log('[trip-importer] timeline places:', tlResult.places.length);
-        }
+        try{
+          var tlPoints=parseGoogleTimelineClient(text);
+          var tlPlaces=clusterByProximity(tlPoints,500).slice(0,200);
+          if(tlPlaces.length){
+            parsed.timelinePlaces=tlPlaces;
+            console.log('[trip-importer] timeline places:', tlPlaces.length);
+          }
+        }catch(tle){jsonWarnings.push(jf.name+': could not parse Google Timeline JSON — '+tle.message);}
       } else if(jf._isTakeoutSidecar){
         // Shape-check rather than trust the filename alone (Takeout's naming has several
         // variants, e.g. "…supplemental-metadata.json") — a real sidecar has photoTakenTime
@@ -1417,8 +1420,7 @@ async function doAnalyze(){
     if(gpsNone)console.log('[trip-importer]',gpsNone,'of',imgFilesToScan.length,'photos had no usable GPS/EXIF data (e.g. screenshots) — skipped');
   }
   if(gpsData.length){
-    var gpsResult=await invoke('/parse-gps','POST',{photos:gpsData});
-    if(gpsResult&&gpsResult.places)parsed.gpsPlaces=gpsResult.places;
+    parsed.gpsPlaces=clusterGpsPhotosClient(gpsData);
   }
   // Stamp each photo's own resolved date (EXIF or Takeout sidecar) back onto imgFiles itself —
   // computeTripTargets() partitions the actual upload list by this, not just the gpsPlaces
@@ -1445,8 +1447,8 @@ async function doAnalyze(){
       try{var gt=await readText(gf);gpxPoints=gpxPoints.concat(parseGPXText(gt));}catch(_e){}
     }
     if(gpxPoints.length){
-      var gpxResult=await invoke('/parse-geo-points','POST',{points:gpxPoints});
-      if(gpxResult&&gpxResult.places)parsed.gpxPlaces=gpxResult.places;
+      var gpxClean=gpxPoints.filter(function(p){return typeof p.lat==='number'&&typeof p.lng==='number'&&!isNaN(p.lat)&&!isNaN(p.lng);});
+      parsed.gpxPlaces=clusterByProximity(gpxClean,500).slice(0,300);
     }
   }
 
@@ -1458,8 +1460,8 @@ async function doAnalyze(){
       try{var kt=kf._text||await readText(kf);kmlPoints=kmlPoints.concat(parseKMLText(kt));}catch(_e){}
     }
     if(kmlPoints.length){
-      var kmlResult=await invoke('/parse-geo-points','POST',{points:kmlPoints});
-      if(kmlResult&&kmlResult.places)parsed.kmlPlaces=kmlResult.places;
+      var kmlClean=kmlPoints.filter(function(p){return typeof p.lat==='number'&&typeof p.lng==='number'&&!isNaN(p.lat)&&!isNaN(p.lng);});
+      parsed.kmlPlaces=clusterByProximity(kmlClean,500).slice(0,300);
     }
   }
 
@@ -1482,7 +1484,12 @@ async function doAnalyze(){
   // 4. Attach original PDFs as trip files (backup for manual review), and pull
   //    their text layer so booking PDFs feed the same regex/AI pipeline as .txt/.eml
   parsed._pdfFiles=pdfFiles; // uploaded as file attachments after trip is created
-  var bookingText='';
+  // Built as an array of per-file blocks, not one concatenated string, so a pile of booking
+  // files can be windowed into several /parse-bookings calls (see BOOKING_CHUNK_BYTES below) —
+  // each file's own text is already capped at 4000 chars, but dropping in dozens of confirmations
+  // at once could still add up to more than one request can carry under the plugin-route proxy's
+  // confirmed ~100KB body limit.
+  var bookingBlocks=[];
   for(var tf of txtFiles){
     try{
       var t=await readText(tf);
@@ -1491,7 +1498,7 @@ async function doAnalyze(){
       // bytes gives mostly headers followed by base64 garbage extractEmlText() decodes the '
       // MIME structure first; .txt files pass through as-is.
       if(tf.name.toLowerCase().endsWith('.eml'))t=extractEmlText(t);
-      bookingText+='\n\n---'+tf.name+'---\n'+t.slice(0,4000);
+      bookingBlocks.push('\n\n---'+tf.name+'---\n'+t.slice(0,4000));
     }catch(_e){}
   }
   var pdfTextOk=0;
@@ -1501,30 +1508,55 @@ async function doAnalyze(){
       try{
         var pbuf=await readBuffer(pf);
         var ptext=await extractPDFText(pbuf,pf.name);
-        if(ptext&&ptext.trim().length>20){bookingText+='\n\n---'+pf.name+'---\n'+ptext.slice(0,4000);pdfTextOk++;}
+        if(ptext&&ptext.trim().length>20){bookingBlocks.push('\n\n---'+pf.name+'---\n'+ptext.slice(0,4000));pdfTextOk++;}
       }catch(_e){}
     }
     showSt1(pdfTextOk+' of '+pdfFiles.length+' PDF'+(pdfFiles.length===1?'':'s')+' had readable text — originals also attached to the trip','');
   }
+  var bookingText=bookingBlocks.join('');
   if(bookingText.trim().length>30){
     showSt1('Scanning text confirmations…','');
-    try{
-      var bResult=await invoke('/parse-bookings','POST',{text:bookingText,useAI:false});
-      if(bResult&&bResult.bookings&&bResult.bookings.length){
-        parsed.bookings=parsed.bookings.concat(bResult.bookings.map(function(b){return Object.assign({},b,{_selected:true});}));
-      } else {
-        parsed._bookingTextForAI=bookingText;
-        document.getElementById('ai-assist-btn').style.display='inline-block';
-      }
-    }catch(_e){}
+    var BOOKING_CHUNK_BYTES=60000;
+    var bookingChunks=[],curChunk='',curChunkLen=0;
+    bookingBlocks.forEach(function(b){
+      if(curChunk&&curChunkLen+b.length>BOOKING_CHUNK_BYTES){bookingChunks.push(curChunk);curChunk='';curChunkLen=0;}
+      curChunk+=b;curChunkLen+=b.length;
+    });
+    if(curChunk)bookingChunks.push(curChunk);
+    var allTextBookings=[];
+    for(var bci=0;bci<bookingChunks.length;bci++){
+      try{
+        var bResult=await invoke('/parse-bookings','POST',{text:bookingChunks[bci],useAI:false});
+        if(bResult&&bResult.bookings&&bResult.bookings.length)allTextBookings=allTextBookings.concat(bResult.bookings);
+      }catch(_e){}
+    }
+    if(allTextBookings.length){
+      parsed.bookings=parsed.bookings.concat(allTextBookings.map(function(b){return Object.assign({},b,{_selected:true});}));
+    } else {
+      // The AI fallback prompt only ever reads the first 18000 chars server-side anyway
+      // (BOOKING_PROMPT + text.slice(0,18000)) — capping here client-side too keeps this
+      // request well under the 100KB body limit with no loss of what AI would actually see.
+      parsed._bookingTextForAI=bookingText.slice(0,18000);
+      document.getElementById('ai-assist-btn').style.display='inline-block';
+    }
   }
 
   // 5. CSV expenses
+  var CSV_CHUNK_BYTES=60000;
   for(var cf of csvFiles){
     try{
       var ct=await readText(cf);
-      var cResult=await invoke('/parse-csv','POST',{text:ct});
-      if(cResult&&cResult.expenses)parsed.expenses=cResult.expenses.map(function(e){return Object.assign({},e,{_selected:true});});
+      var csvChunks=ct.length>CSV_CHUNK_BYTES?chunkCsvRows(ct,CSV_CHUNK_BYTES):[ct];
+      var fileExpenses=[];
+      for(var cci=0;cci<csvChunks.length;cci++){
+        var cResult=await invoke('/parse-csv','POST',{text:csvChunks[cci]});
+        if(cResult&&cResult.expenses){
+          fileExpenses=fileExpenses.concat(cResult.expenses.map(function(e){return Object.assign({},e,{_id:cf.name+'_'+cci+'_'+e._id});}));
+        }
+      }
+      // Concat across files/chunks, not overwrite — a second CSV used to silently replace the
+      // first file's already-parsed expenses instead of adding to them.
+      parsed.expenses=parsed.expenses.concat(fileExpenses.map(function(e){return Object.assign({},e,{_selected:true});}));
     }catch(_e){}
   }
 
@@ -1566,9 +1598,22 @@ async function doAnalyzeCollection(){
       // is the one part of the format that's stable regardless of which property-naming
       // variant a given export uses (see /parse-google-places' own comment on that).
       if(data&&data.type==='FeatureCollection'&&Array.isArray(data.features)){
-        var gpResult=await invoke('/parse-google-places','POST',{json:text});
-        if(gpResult&&gpResult.places)gpResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'Google Maps'}));});
-        else if(gpResult&&gpResult.error)warnings.push(jf.name+': '+gpResult.error);
+        // A large Takeout saved-places export easily pushes the whole file's JSON text past the
+        // plugin-route proxy's confirmed ~100KB body limit — split the features array into
+        // budget-sized FeatureCollections client-side instead of sending it in one call.
+        var GP_CHUNK_BYTES=60000,gpChunks=[],gpCur=[],gpCurBytes=2;
+        data.features.forEach(function(f){
+          var fBytes=JSON.stringify(f).length;
+          if(gpCur.length&&gpCurBytes+fBytes>GP_CHUNK_BYTES){gpChunks.push(gpCur);gpCur=[];gpCurBytes=2;}
+          gpCur.push(f);gpCurBytes+=fBytes+1;
+        });
+        if(gpCur.length)gpChunks.push(gpCur);
+        if(!gpChunks.length)gpChunks=[data.features];
+        for(var gpci=0;gpci<gpChunks.length;gpci++){
+          var gpResult=await invoke('/parse-google-places','POST',{json:JSON.stringify({type:'FeatureCollection',features:gpChunks[gpci]})});
+          if(gpResult&&gpResult.places)gpResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'Google Maps'}));});
+          else if(gpResult&&gpResult.error)warnings.push(jf.name+': '+gpResult.error);
+        }
       }else{
         warnings.push(jf.name+": doesn't look like a Google Maps saved-places export (expected a GeoJSON FeatureCollection)");
       }
@@ -1596,9 +1641,12 @@ async function doAnalyzeCollection(){
   for(var cf of csvFiles){
     try{
       var csvText=await readText(cf);
-      var csvResult=await invoke('/parse-places-csv','POST',{text:csvText});
-      if(csvResult&&csvResult.places)csvResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'CSV'}));});
-      else if(csvResult&&csvResult.error)warnings.push(cf.name+': '+csvResult.error);
+      var placesCsvChunks=csvText.length>60000?chunkCsvRows(csvText,60000):[csvText];
+      for(var pcci=0;pcci<placesCsvChunks.length;pcci++){
+        var csvResult=await invoke('/parse-places-csv','POST',{text:placesCsvChunks[pcci]});
+        if(csvResult&&csvResult.places)csvResult.places.forEach(function(p){parsedCollection.places.push(Object.assign({},p,{_selected:true,_source:'CSV'}));});
+        else if(csvResult&&csvResult.error)warnings.push(cf.name+': '+csvResult.error);
+      }
     }catch(e){warnings.push(cf.name+': '+e.message);}
   }
 
@@ -2633,6 +2681,110 @@ async function doImport(){
   var totalRefs=batches.reduce(function(n,b){return n+(b.refs?b.refs.length:0);},0);
   if(undoBtn){undoBtn.style.display=totalRefs?'':'none';undoBtn.disabled=false;undoBtn.textContent='Undo this import';}
   rh();
+}
+
+// ── Split CSV text into several chunks, each carrying its own copy of the header row — used
+// so a single large CSV file (expense sheet or place list) doesn't push a /parse-csv or
+// /parse-places-csv request past the plugin-route proxy's confirmed ~100KB body limit. Both
+// routes treat line 0 as the header unconditionally, so every chunk needs it re-prepended.
+function chunkCsvRows(text,budgetBytes){
+  var lines=text.split(/\r?\n/);
+  var headerIdx=0;
+  while(headerIdx<lines.length&&!lines[headerIdx].trim())headerIdx++;
+  if(headerIdx>=lines.length)return [text];
+  var header=lines[headerIdx];
+  var dataLines=lines.slice(headerIdx+1).filter(function(l){return l.trim();});
+  if(!dataLines.length)return [text];
+  var chunks=[],cur=[],curBytes=header.length+1;
+  dataLines.forEach(function(line){
+    var lb=line.length+1;
+    if(cur.length&&curBytes+lb>budgetBytes){chunks.push(header+'\n'+cur.join('\n'));cur=[];curBytes=header.length+1;}
+    cur.push(line);curBytes+=lb;
+  });
+  if(cur.length)chunks.push(header+'\n'+cur.join('\n'));
+  return chunks.length?chunks:[text];
+}
+
+// ── Parse Google Maps Timeline JSON — mirrors server/index.js's parseGoogleTimeline() exactly.
+// Moved client-side (previously sent the ENTIRE timeline JSON text to /parse-timeline in one
+// invoke() call) because a Timeline export commonly runs into multiple MB — the single biggest
+// risk of hitting the confirmed ~100KB plugin-route body-size ceiling of any source this plugin
+// handles, worse than the GPX/KML case that prompted moving those client-side first. JSON.parse
+// of a multi-MB string is cheap in a browser; only the extracted, clustered places (usually a
+// tiny fraction of the raw point count) ever need to leave the client now.
+function parseGoogleTimelineClient(json){
+  var data=typeof json==='string'?JSON.parse(json):json;
+  var places=[];
+  if(data.semanticSegments){
+    data.semanticSegments.forEach(function(seg){
+      if(seg.visit){
+        var loc=(seg.visit.topCandidate&&seg.visit.topCandidate.placeLocation&&seg.visit.topCandidate.placeLocation.latLng)||seg.visit.hierarchyLevel;
+        if(loc){
+          var lat,lng;
+          if(typeof loc==='string'){var parts=loc.split(',').map(Number);lat=parts[0];lng=parts[1];}
+          else{lat=loc.latitudeE7/1e7;lng=loc.longitudeE7/1e7;}
+          var start=seg.startTime||seg.visit.startTime;
+          var date=start?start.slice(0,10):null;
+          var name=(seg.visit.topCandidate&&seg.visit.topCandidate.semanticType)||null;
+          places.push({lat:lat,lng:lng,date:date,name:name,photoCount:1});
+        }
+      }
+    });
+  }
+  if(data.timelineObjects){
+    data.timelineObjects.forEach(function(obj){
+      if(obj.placeVisit){
+        var pv=obj.placeVisit,loc2=pv.location;
+        if(loc2){
+          var lat2=loc2.latitudeE7/1e7,lng2=loc2.longitudeE7/1e7;
+          var date2=(pv.duration&&pv.duration.startTimestamp)?pv.duration.startTimestamp.slice(0,10):null;
+          places.push({lat:lat2,lng:lng2,date:date2,name:loc2.name||null,photoCount:1});
+        }
+      }
+    });
+  }
+  if(data.locations&&places.length===0){
+    var locs=data.locations;
+    var step=Math.max(1,Math.floor(locs.length/200));
+    for(var i=0;i<locs.length;i+=step){
+      var l=locs[i];
+      if(typeof l.latitudeE7==='number'&&typeof l.longitudeE7==='number'){
+        var date3=l.timestamp?l.timestamp.slice(0,10):null;
+        places.push({lat:l.latitudeE7/1e7,lng:l.longitudeE7/1e7,date:date3,name:null,photoCount:1});
+      }
+    }
+  }
+  return places;
+}
+
+// ── Cluster raw photo GPS points into places, day-by-day — mirrors server/index.js's old
+// /parse-gps handler exactly (bucket by date first, then cluster WITHIN each day so a day with
+// photos from several distinct attractions doesn't collapse into one place). Moved client-side
+// for the same 100KB-body-limit reason as parseGoogleTimelineClient() above — a multi-month trip
+// with thousands of photos was a real risk of pushing the raw {lat,lng,date,name} array alone
+// past the plugin-route ceiling, even with no image data in it.
+function clusterGpsPhotosClient(photos){
+  var byDate={};
+  photos.forEach(function(p){
+    if(typeof p.lat!=='number'||typeof p.lng!=='number')return;
+    var date=(p.date||'').slice(0,10)||'unknown';
+    if(!byDate[date])byDate[date]=[];
+    byDate[date].push(p);
+  });
+  var places=[];
+  Object.keys(byDate).forEach(function(date){
+    var clusters=clusterByProximity(byDate[date],500);
+    clusters.forEach(function(c){
+      places.push({
+        date:date==='unknown'?null:date,
+        lat:c.lat,lng:c.lng,
+        photoCount:c.members.length,
+        photoNames:c.members.map(function(m){return m.name;}),
+      });
+    });
+  });
+  places.sort(function(a,b){return (a.date||'').localeCompare(b.date||'');});
+  return places;
 }
 
 // ── Distance between two coords in metres — mirrors server/index.js's haversine() exactly ──

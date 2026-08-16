@@ -251,8 +251,9 @@ function haversine(lat1, lng1, lat2, lng2) {
 // one place tied to whichever visit happened to be processed first. So a merge also requires
 // the dates to agree — unless one side has no date at all, in which case it can still join
 // (nothing to conflict with), and the cluster adopts that date if it didn't have one yet.
-// Confirmed as the cause of places silently never landing on a day: /parse-timeline clusters
-// a trip's ENTIRE location history in one pass (no per-day bucketing, unlike /parse-gps), so
+// Confirmed as the cause of places silently never landing on a day: Google Timeline clustering
+// (now done client-side, see parseGoogleTimelineClient() in client/index.html) clusters a trip's
+// ENTIRE location history in one pass (no per-day bucketing, unlike the GPS-photo path), so
 // any place visited more than once was already collapsing to a single date before this fix —
 // and even for GPS-only imports, a cluster whose first-processed member had no EXIF date used
 // to stay dateless forever regardless of how many dated members merged into it afterward.
@@ -272,67 +273,6 @@ function clusterByProximity(places, radiusMetres = 800) {
     }
   }
   return clusters
-}
-
-// ── Parse Google Maps Timeline ────────────────────────────────────────────────
-function parseGoogleTimeline(json) {
-  const data = typeof json === 'string' ? JSON.parse(json) : json
-
-  // New format: { semanticSegments: [...] } or { timelineObjects: [...] }
-  // Old format: { locations: [...] }
-  const places = []
-
-  // New format (2024+): semanticSegments with placeVisit
-  if (data.semanticSegments) {
-    for (const seg of data.semanticSegments) {
-      const visit = seg.timelinePath || seg.visit || seg.placeVisit
-      if (seg.visit) {
-        const loc = seg.visit.topCandidate?.placeLocation?.latLng || seg.visit.hierarchyLevel
-        if (loc) {
-          const [lat, lng] = typeof loc === 'string' ? loc.split(',').map(Number) : [loc.latitudeE7 / 1e7, loc.longitudeE7 / 1e7]
-          const start = seg.startTime || seg.visit.startTime
-          const date = start ? start.slice(0, 10) : null
-          const name = seg.visit.topCandidate?.semanticType || null
-          places.push({ lat, lng, date, name, photoCount: 1 })
-        }
-      }
-    }
-  }
-
-  // Old format: timelineObjects with placeVisit
-  if (data.timelineObjects) {
-    for (const obj of data.timelineObjects) {
-      if (obj.placeVisit) {
-        const pv = obj.placeVisit
-        const loc = pv.location
-        if (loc) {
-          const lat = loc.latitudeE7 / 1e7
-          const lng = loc.longitudeE7 / 1e7
-          const date = pv.duration?.startTimestamp?.slice(0, 10) || null
-          places.push({ lat, lng, date, name: loc.name || null, photoCount: 1 })
-        }
-      }
-    }
-  }
-
-  // Raw locations format
-  if (data.locations && places.length === 0) {
-    // Sample every ~100th point to avoid thousands of places
-    const locs = data.locations
-    const step = Math.max(1, Math.floor(locs.length / 200))
-    for (let i = 0; i < locs.length; i += step) {
-      const l = locs[i]
-      // Truthy checks silently drop a real point exactly on the equator or prime meridian
-      // (latitudeE7/longitudeE7 === 0, a legitimate coordinate, is falsy) — check the fields
-      // are actually present instead of checking they're non-zero.
-      if (typeof l.latitudeE7 === 'number' && typeof l.longitudeE7 === 'number') {
-        const date = l.timestamp ? l.timestamp.slice(0, 10) : null
-        places.push({ lat: l.latitudeE7 / 1e7, lng: l.longitudeE7 / 1e7, date, name: null, photoCount: 1 })
-      }
-    }
-  }
-
-  return places
 }
 
 
@@ -750,7 +690,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.3.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.3.1 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -839,69 +779,6 @@ module.exports = definePlugin({
       },
     },
 
-    // ── Parse GPS from photos (client sends pre-extracted coords) ─────────────
-    {
-      method: 'POST', path: '/parse-gps', auth: true,
-      async handler(req, ctx) {
-        const photos = req.body?.photos || []
-        const result = await tryAttempt(async () => {
-          const byDate = {}
-          for (const p of photos) {
-            // Truthy checks silently drop a real photo taken exactly on the equator or prime
-            // meridian (lat/lng === 0 is a legitimate coordinate, but falsy) — check the fields
-            // are actually numbers instead of checking they're non-zero.
-            if (typeof p.lat !== 'number' || typeof p.lng !== 'number') continue
-            const date = (p.date || '').slice(0, 10) || 'unknown'
-            if (!byDate[date]) byDate[date] = []
-            byDate[date].push(p)
-          }
-          // One point per DAY (median lat/lng of all that day's photos) collapses multiple distinct
-          // locations visited the same day into a single, sometimes-nowhere-real point — e.g. a day
-          // with photos from 3 different attractions produced 1 "place" roughly between them. Cluster
-          // by proximity WITHIN each day first (same radius as parse-timeline), so a day only becomes
-          // one place if its photos were actually all taken near each other.
-          // 'unknown' above is only a grouping key for photos with no EXIF date — it must never
-          // leak into the place's own `date` field. It's not a valid YYYY-MM-DD, and downstream
-          // consumers (the client's date-auto-detect fallback, /import's date-range fallback,
-          // both of which sort raw date strings to find a min/max) would otherwise treat the
-          // literal string "unknown" as sorting after every real date and wrongly pick it as
-          // the trip's end date.
-          const places = []
-          for (const [date, pts] of Object.entries(byDate)) {
-            const clusters = clusterByProximity(pts, 500)
-            for (const c of clusters) {
-              places.push({
-                date: date === 'unknown' ? null : date,
-                lat: c.lat,
-                lng: c.lng,
-                photoCount: c.members.length,
-                photoNames: c.members.map(m => m.name),
-              })
-            }
-          }
-          places.sort((a, b) => (a.date || '').localeCompare(b.date || ''))
-          return { places, totalPhotos: photos.length }
-        })
-        return safeJson(200, result)
-      },
-    },
-
-    // ── Parse Google Maps Timeline JSON ───────────────────────────────────────
-    {
-      method: 'POST', path: '/parse-timeline', auth: true,
-      async handler(req, ctx) {
-        const raw = req.body?.json
-        if (!raw) return safeJson(200, { places: [] })
-        const result = await tryAttempt(async () => {
-          const data = typeof raw === 'string' ? JSON.parse(raw) : raw
-          const places = parseGoogleTimeline(data)
-          // Cluster nearby points
-          const clusters = clusterByProximity(places, 500)
-          return { places: clusters.slice(0, 200), totalPoints: places.length }
-        })
-        return safeJson(200, result)
-      },
-    },
 
     // ── Parse expense CSV ─────────────────────────────────────────────────────
     {
@@ -978,23 +855,6 @@ module.exports = definePlugin({
         const result = await tryAttempt(async () => {
           const bookings = parseICS(text)
           return { bookings, summary: bookings.length + ' event' + (bookings.length === 1 ? '' : 's') + ' found' }
-        })
-        return safeJson(200, result)
-      },
-    },
-
-    // ── Cluster raw geo points (client-parsed GPX/KML) ────────────────────────
-    // GPX/KML are XML, so parsing happens client-side (DOMParser) — this route just
-    // does the same proximity clustering + cap that /parse-timeline applies to
-    // Google Timeline points, reused so both sources land on the same places pipeline.
-    {
-      method: 'POST', path: '/parse-geo-points', auth: true,
-      async handler(req, ctx) {
-        const points = Array.isArray(req.body?.points) ? req.body.points : []
-        const result = await tryAttempt(async () => {
-          const clean = points.filter(p => typeof p?.lat === 'number' && typeof p?.lng === 'number' && !isNaN(p.lat) && !isNaN(p.lng))
-          const clusters = clusterByProximity(clean, 500)
-          return { places: clusters.slice(0, 300), totalPoints: clean.length }
         })
         return safeJson(200, result)
       },
@@ -1680,7 +1540,19 @@ module.exports = definePlugin({
                   const day = await ctx.days.create(tripId, { date: dateStr })
                   const dayId = day?.id ?? day?.data?.id
                   if (dayId) { dayMap[dateStr] = dayId; p.daysCreated++ }
-                } catch (e) { errors.push('Day ' + dateStr + ': ' + e.message) }
+                } catch (e) {
+                  const msg = e.message || String(e)
+                  errors.push('Day ' + dateStr + ': ' + msg)
+                  // A host rate-limit error is transient, not a real per-date failure — treating it
+                  // like one (log-and-move-on) permanently loses that day row, since indices are
+                  // never revisited once consumed. Break instead, leaving p.days at THIS index so
+                  // the next resumed round retries the same date rather than skipping it forever.
+                  // Confirmed against a real large-trip import (106-day range, no throttle at all
+                  // here — unlike every other bulk ctx.* loop in this file): the host's dispatch rate
+                  // limit kicked in partway through and every remaining date failed the same way.
+                  if (/rate limit/i.test(msg)) break
+                }
+                await sleep(60) // stay under the host's ctx.* dispatch rate limit
               }
             }
             p.days = i
@@ -1699,13 +1571,24 @@ module.exports = definePlugin({
           }
 
           // ── 2. Polarsteps → Journal + Places + Day Notes ───────────────────
+          // journalActive (journal entries + day notes) and stepPlacesActive (places from each
+          // step's own GPS coordinate) are independent toggles in the UI ("Polarsteps journal
+          // entries" vs "Places & GPS locations") — but until this fix, place creation for
+          // Polarsteps steps was nested entirely INSIDE the journalActive branch, so unchecking
+          // "journal entries" while leaving "places" checked silently created zero places from
+          // Polarsteps steps (confirmed: a Polarsteps-only import with importJournal:false and
+          // importPlaces:true produced a trip with no places at all, no errors). Both toggles now
+          // gate the same step-walking loop; only journal-entry/day-note creation stays
+          // conditional on journalActive within it.
           const journalActive = !!(polarsteps && options?.importJournal)
-          if (journalActive && p.journal < totalSteps) {
+          const stepPlacesActive = !!(polarsteps && options?.importPlaces)
+          if ((journalActive || stepPlacesActive) && p.journal < totalSteps) {
             try {
               // Journey is created ONCE (first call, journeyId not yet known) and reused on every
               // resume call — otherwise each resumed call would start a brand new empty journey.
+              // Only relevant when journalActive — a places-only import has no journey at all.
               let journeyId = p.journeyId
-              if (!journeyId) {
+              if (journalActive && !journeyId) {
                 const journey = await ctx.journal.createJourney({
                   title: polarsteps.name,
                   subtitle: polarsteps.totalKm ? polarsteps.totalKm.toLocaleString() + ' km travelled' : null,
@@ -1733,7 +1616,12 @@ module.exports = definePlugin({
                   } catch (e) { errors.push('Trip overview entry: ' + e.message) }
                 }
               }
-              if (journeyId) {
+              // Bail out (mark done, don't retry) only if journal entries were actually requested
+              // but the journey itself couldn't be created/found — a places-only import has no
+              // such dependency and should proceed regardless.
+              if (journalActive && !journeyId) {
+                p.journal = totalSteps
+              } else {
                 let i = p.journal
                 for (; i < stepOffset + steps.length; i++) {
                   if (!withinBudget()) break
@@ -1769,24 +1657,45 @@ module.exports = definePlugin({
                       await sleep(80)
                     }
 
-                    const weatherNote = step.weather
-                      ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
-                      : ''
                     const entryDate = step.date || polarsteps.startDate
-                    const entryContent = (step.description || '') + weatherNote
-                    const entryWeather = mapPolarstepsWeather(step.weather?.condition)
-                    const entryLocation = mapPolarstepsEntryLocation(step, placeName)
 
-                    const entry = { entry_date: entryDate, title: step.name, story: entryContent, weather: entryWeather, ...entryLocation }
-                    if (placeId) entry.place_id = placeId
-                    const entryRes = await ctx.journal.createEntry(journeyId, entry)
-                    p.journalEntries++
-                    const entryId = entryRes?.id ?? entryRes?.data?.id
-                    if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                    if (journalActive && journeyId) {
+                      const weatherNote = step.weather
+                        ? '\n\n_' + step.weather.condition.replace(/-/g, ' ') + (step.weather.tempC != null ? ', ' + step.weather.tempC + '°C' : '') + '_'
+                        : ''
+                      const entryContent = (step.description || '') + weatherNote
+                      const entryWeather = mapPolarstepsWeather(step.weather?.condition)
+                      const entryLocation = mapPolarstepsEntryLocation(step, placeName)
 
-                    // Linking a place to the journal entry (above) does NOT put it on the trip's
+                      const entry = { entry_date: entryDate, title: step.name, story: entryContent, weather: entryWeather, ...entryLocation }
+                      if (placeId) entry.place_id = placeId
+                      const entryRes = await ctx.journal.createEntry(journeyId, entry)
+                      p.journalEntries++
+                      const entryId = entryRes?.id ?? entryRes?.data?.id
+                      if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
+
+                      // Also add to day notes if day exists for this date
+                      if (options.importDayNotes && entryDate && dayMap[entryDate] && step.description) {
+                        try {
+                          // The host's rpc-host.ts hard-requires `input.text` (throws BadParams
+                          // otherwise, which the try/catch here was silently swallowing) — `content`
+                          // is not a real daynotes field at all, so every Polarsteps day-note import
+                          // has always failed silently despite importDayNotes being enabled/reported.
+                          const noteRes = await ctx.daynotes.create(tripId, dayMap[entryDate], {
+                            text: '**' + step.name + '**\n' + step.description,
+                          })
+                          p.journalDayNotes++
+                          const noteId = noteRes?.id ?? noteRes?.data?.id
+                          if (noteId) p.createdRefs.push({ type: 'daynote', id: noteId })
+                        } catch (_e) {}
+                      }
+                    }
+
+                    // Linking a place to a journal entry (above) does NOT put it on the trip's
                     // day/itinerary view — that's a separate assignment, easy to forget since the
-                    // place still looks "imported" either way.
+                    // place still looks "imported" either way. Runs whenever a place was created
+                    // at all, independent of journalActive, so a places-only import still lands
+                    // on the itinerary.
                     if (placeId && entryDate && dayMap[entryDate]) {
                       try { await ctx.itinerary.assign(tripId, dayMap[entryDate], placeId) } catch (_e) {}
 
@@ -1815,28 +1724,10 @@ module.exports = definePlugin({
                       }
                     }
 
-                    // Also add to day notes if day exists for this date
-                    if (options.importDayNotes && entryDate && dayMap[entryDate] && step.description) {
-                      try {
-                        // The host's rpc-host.ts hard-requires `input.text` (throws BadParams
-                        // otherwise, which the try/catch here was silently swallowing) — `content`
-                        // is not a real daynotes field at all, so every Polarsteps day-note import
-                        // has always failed silently despite importDayNotes being enabled/reported.
-                        const noteRes = await ctx.daynotes.create(tripId, dayMap[entryDate], {
-                          text: '**' + step.name + '**\n' + step.description,
-                        })
-                        p.journalDayNotes++
-                        const noteId = noteRes?.id ?? noteRes?.data?.id
-                        if (noteId) p.createdRefs.push({ type: 'daynote', id: noteId })
-                      } catch (_e) {}
-                    }
-
-                    await sleep(100)
+                    await sleep(journalActive ? 100 : 20)
                   } catch (e) { errors.push('Step ' + step.name + ': ' + e.message) }
                 }
                 p.journal = i
-              } else {
-                p.journal = totalSteps // couldn't create/find a journey — don't retry forever
               }
             } catch (e) { errors.push('Journal: ' + e.message) }
           }
@@ -1845,6 +1736,11 @@ module.exports = definePlugin({
             if (p.journalDayNotes) msg += ', ' + p.journalDayNotes + ' day notes'
             if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
+          } else if (stepPlacesActive) {
+            const placeCount = Object.keys(p.stepPlaceIds || {}).length
+            let msg = 'Added ' + placeCount + ' place' + (placeCount === 1 ? '' : 's') + ' from Polarsteps steps'
+            if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
+            log.push({ type: 'places', message: msg })
           }
 
           // ── 3. GPS + Timeline Places — deduplicated and geocoded ──────────
@@ -2046,7 +1942,7 @@ module.exports = definePlugin({
           }
 
           p.done = p.days >= dateRange.length &&
-            (!journalActive || p.journal >= totalSteps) &&
+            (!(journalActive || stepPlacesActive) || p.journal >= totalSteps) &&
             (!options?.importPlaces || p.places >= totalClusters) &&
             (!bookingsActive || p.bookings >= totalBookingsCount) &&
             (!costsActive || p.costs >= totalExpensesCount)
