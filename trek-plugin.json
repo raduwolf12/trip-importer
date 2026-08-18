@@ -1,10 +1,10 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "apiVersion": 1,
   "type": "page",
-  "trek": ">=3.4.0 <4.0.0",
+  "trek": ">=3.4.0 <4.1.0",
   "author": "raduwolf12",
   "description": "Reconstruct past trips from Polarsteps, GPS photos, booking PDFs/ICS, expense CSVs and Google Timeline \u2014 auto-creates the trip, journal, places, bookings and costs, with multi-trip detection and undo.",
   "icon": "PackageOpen",
