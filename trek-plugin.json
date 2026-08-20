@@ -1,7 +1,7 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "apiVersion": 1,
   "type": "page",
   "trek": ">=3.4.0 <4.1.0",
@@ -30,6 +30,7 @@
     "db:write:collections",
     "ai:invoke",
     "hook:photo-provider",
+    "http:outbound",
     "http:outbound:nominatim.openstreetmap.org",
     "http:outbound:polarsteps.s3.amazonaws.com",
     "http:outbound:www.google.com",
@@ -47,6 +48,7 @@
     "naver.me",
     "pages.map.naver.com"
   ],
+  "operatorEgress": true,
   "settings": [
     {
       "key": "trek_base_url",
@@ -56,6 +58,24 @@
       "required": false,
       "placeholder": "https://trek.example.com",
       "hint": "Only needed for the photo-search feature (lets your imported photos show up in TREK's native photo picker, including for journal entries). Enter the URL you personally access this TREK instance at, under your own Settings \u2014 used to turn this plugin's own uploaded-file paths into absolute links. Leave blank to disable photo search for yourself; nothing else in this plugin depends on it."
+    },
+    {
+      "key": "immich_base_url",
+      "label": "Immich server URL",
+      "input_type": "text",
+      "scope": "user",
+      "required": false,
+      "placeholder": "https://immich.example.com",
+      "hint": "Your self-hosted Immich server address. Your TREK admin must also allow outbound access to this host under Admin \u2192 Plugins (this plugin declares operator-managed egress since everyone's Immich server is different) \u2014 ask them to add it if the Immich picker can't connect. Leave blank to disable importing photos from Immich."
+    },
+    {
+      "key": "immich_api_key",
+      "label": "Immich API key",
+      "input_type": "password",
+      "scope": "user",
+      "required": false,
+      "secret": true,
+      "hint": "Create one in Immich under Account Settings \u2192 API Keys. Stored encrypted and only ever read by this plugin's server-side code \u2014 never sent to your browser."
     }
   ]
 }
