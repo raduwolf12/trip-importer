@@ -22,6 +22,7 @@ And **Collection mode**: import places into one of your Collections (a saved-pla
 | **Google Maps Timeline** (`location-history.json` / `Records.json`) | Places clustered from location history |
 | **Expense CSV** | Cost entries with auto-detected categories, localized number formats handled |
 | **Google Maps "Saved places" export, KML/KMZ, place-list CSV, or a pasted Google/Naver Maps list link** *(Collection mode only)* | Places saved into a Collection instead of a trip |
+| **Photos/albums picked from your own Immich server** | Trip mode: places pinned to the map, clustered with any other GPS photos. Collection mode: each picked photo becomes its own saved place. Both use Immich's own metadata (GPS/date) — if you've corrected a photo's location or date inside Immich, that corrected value is used instead of the original file's embedded EXIF |
 
 A Polarsteps ZIP with multiple trips detected inside becomes multiple separate TREK trips, each auto-scoped to its own dates — nothing gets dumped into one trip by mistake. Large trips (100+ Polarsteps steps, big expense CSVs, hundreds of GPS clusters) are automatically paginated across several import calls so nothing gets rejected for being too large in one request.
 
@@ -33,7 +34,8 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 
 1. Install and activate the plugin, approving the requested permissions (see below).
 2. Optional — for the photo-search feature: go to your own **Settings → Plugins → Trip Importer** and set **TREK public base URL** to the address you personally access this TREK instance at (e.g. `https://trek.example.com`). This is per-user, not an admin setting. *(Note: as of the current TREK release, no photo picker in TREK's UI actually queries this yet — the plugin side is ready and correct, but there's nothing on TREK's side consuming it yet. Safe to leave unset until that changes.)*
-3. Open **Trip Importer** from the main navigation, drop your files, and follow the wizard.
+3. Optional — to import from Immich: set **Immich server URL** and **Immich API key** (create one in Immich under Account Settings → API Keys) in the same per-user Settings panel. **Your Immich server is a self-hosted, user-specific host, so it can't be pre-declared in the plugin's manifest the way Nominatim or Polarsteps' CDN are** — this plugin instead ships with `operatorEgress: true`, meaning your TREK **instance admin** must add your Immich hostname under **Admin → Plugins** before the "Import from Immich" picker can reach it. Ask them if the picker reports a connection error.
+4. Open **Trip Importer** from the main navigation, drop your files (or pick photos from Immich), and follow the wizard.
 
 ## How to use
 
@@ -56,10 +58,12 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 - **Pasting a shared list link** (Google Maps or Naver Maps) uses the same undocumented internal endpoints TREK's own core "List Import" feature uses — it isn't an official API and could break if either service changes it; a single-*place* share link (as opposed to a *list*) isn't supported, since it carries no list to import — paste that into TREK's own place search instead
 - **GPS photos, GPX/KML tracks, and Google Maps Timeline exports** are all clustered into places entirely in your browser before anything is sent to the server — needed because the plugin-route proxy enforces a hard ~100KB request body limit, and any of these can easily produce a raw point list bigger than that for a large trip (a Timeline export in particular is routinely several MB)
 - **Booking text (PDFs/.txt/.eml), expense CSVs, and Google Maps "Saved places" exports** are windowed into several requests client-side (same ~60KB-per-call budget used elsewhere) instead of being sent whole, for the same reason
+- **Importing from Immich** opens a picker with three tabs — **Albums** (the default), **Date Range** (auto-filled from whatever trip dates are already known, editable), and **All Photos** — with a "Select all" checkbox and thumbnails so you can see what you're picking. It resolves each photo's current GPS/date server-side (an in-Immich edit always wins over the original file's embedded EXIF) and feeds them into the exact same clustering pipeline as dropped GPS photos — Immich picks and dropped photos can be mixed freely in one import. Only the location/date metadata is imported this way; the actual image bytes are not currently re-uploaded into the trip's Files tab (unlike dropped photo files) — this may be added later
 
 ## Known limitations
 
 - **TREK's plugin-route proxy caps every request body at ~100KB**, enforced before the plugin's own route handler runs — a request over that limit gets rejected with an HTTP 413 that **never reaches this plugin's own error handling or logs**, so the only visible symptom in the TREK UI is the import spinner never finishing. If an import seems to hang indefinitely rather than showing an error, this is the most likely cause. Every known source of this has now been windowed or moved client-side (see the Notes above) — if you still hit it, please report it with the file size/type involved.
+- **The Immich picker requires your instance admin to allow your specific Immich hostname** (see Setup) — there's no way for this plugin to request that automatically per-user, since egress for a self-hosted/user-supplied host can only be granted at the instance/operator level, not per end-user.
 
 ## Permissions
 
@@ -90,3 +94,4 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 | `http:outbound:maps.app.goo.gl` / `http:outbound:goo.gl` | Following a shortened Google Maps list link to its real URL |
 | `http:outbound:naver.me` | Following a shortened Naver Maps list link to its real URL |
 | `http:outbound:pages.map.naver.com` | Fetching a shared Naver Maps list's places |
+| `http:outbound` (bare, `operatorEgress: true`) | Reaching your own self-hosted Immich server — its hostname is user-specific and can't be a fixed permission, so your instance admin grants it at runtime under Admin → Plugins instead |

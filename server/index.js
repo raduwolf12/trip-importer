@@ -171,6 +171,104 @@ async function reverseGeocode(lat, lng) {
   } catch (_e) { return null }
 }
 
+// ── Immich API access ────────────────────────────────────────────────────────
+// Both settings are per-user (scope:'user'), mirroring trek_base_url — different users of the
+// same TREK instance may run different personal Immich servers. Because a self-hosted host can't
+// be a fixed literal in trek-plugin.json's egress[] (unlike nominatim/polarsteps), this plugin
+// declares operatorEgress:true instead — the instance admin must add each user's Immich host under
+// Admin → Plugins before requests to it will succeed; see trek-plugin.json's immich_base_url hint.
+async function readImmichSettingsOnce(ctx) {
+  const baseUrl = String((await attempt(() => ctx.settings.get('immich_base_url'))) || '').replace(/\/+$/, '')
+  const apiKey = String((await attempt(() => ctx.settings.get('immich_api_key'))) || '')
+  return { baseUrl, apiKey }
+}
+// A burst of concurrent picker requests (switching albums fast, thumbnails loading as the grid
+// scrolls) was confirmed to intermittently surface a false {error:'not_configured'} even though
+// the settings ARE saved — ctx.settings.get() occasionally returns undefined for one of several
+// near-simultaneous calls under load rather than for a genuinely missing setting. One short retry
+// absorbs that transient race instead of surfacing a misleading "not configured" to the user.
+async function immichSettings(ctx) {
+  const first = await readImmichSettingsOnce(ctx)
+  if (first.baseUrl && first.apiKey) return first
+  await sleep(150)
+  return readImmichSettingsOnce(ctx)
+}
+// For raw binary responses (thumbnails, original files) — immichFetch() above always does
+// res.json(), which would throw/mangle image bytes.
+async function immichFetchBinary(ctx, path) {
+  const { baseUrl, apiKey } = await immichSettings(ctx)
+  if (!baseUrl || !apiKey) return { error: 'not_configured' }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 6000)
+  try {
+    const res = await fetch(baseUrl + '/api' + path, { headers: { 'x-api-key': apiKey }, signal: controller.signal })
+    if (!res.ok) return { error: 'Immich request failed: ' + res.status + ' ' + res.statusText }
+    const buf = Buffer.from(await res.arrayBuffer())
+    return { base64: buf.toString('base64'), mimetype: res.headers.get('content-type') || 'image/jpeg', sizeBytes: buf.length }
+  } finally { clearTimeout(timeout) }
+}
+async function immichFetch(ctx, path, opts) {
+  const { baseUrl, apiKey } = await immichSettings(ctx)
+  if (!baseUrl || !apiKey) return { error: 'not_configured' }
+  const controller = new AbortController()
+  // Kept well under the ~8s trek:invoke bridge round-trip ceiling documented above reverseGeocode().
+  const timeout = setTimeout(() => controller.abort(), 6000)
+  try {
+    const res = await fetch(baseUrl + '/api' + path, {
+      method: (opts && opts.method) || 'GET',
+      headers: Object.assign({ 'x-api-key': apiKey, Accept: 'application/json' }, (opts && opts.body) ? { 'Content-Type': 'application/json' } : {}),
+      body: opts && opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal,
+    })
+    if (!res.ok) return { error: 'Immich request failed: ' + res.status + ' ' + res.statusText }
+    return await res.json()
+  } finally { clearTimeout(timeout) }
+}
+// Both /search/metadata (album listing) and /search/smart (free-text search) return the same
+// paginated SearchResponseDto shape (`assets.items`/`assets.nextPage`), capped at 1000 items per
+// page server-side by Immich itself — a single call was confirmed to silently cap out at Immich's
+// own default page size (250) for an album with thousands of photos, which is exactly why
+// "Select all shown" only ever saw 250 of a 3000+-photo album. Loops pages (size:1000 each) until
+// Immich reports no nextPage, a sane item cap, or a time budget is hit — whichever comes first —
+// since a truly enormous album could otherwise blow well past the ~8s trek:invoke bridge ceiling
+// documented above reverseGeocode().
+async function immichPaginatedAssets(ctx, path, baseBody, capItems, budgetMs) {
+  const deadline = Date.now() + budgetMs
+  const items = []
+  let page = 1, truncated = false
+  for (;;) {
+    if (Date.now() > deadline) { truncated = true; break }
+    const data = await immichFetch(ctx, path, { method: 'POST', body: Object.assign({ size: 1000, page }, baseBody) })
+    if (data?.error) return { error: data.error }
+    const pageItems = Array.isArray(data?.assets?.items) ? data.assets.items : []
+    items.push(...pageItems)
+    const nextPage = data?.assets?.nextPage
+    if (!nextPage || !pageItems.length || items.length >= capItems) {
+      if (nextPage && items.length >= capItems) truncated = true
+      break
+    }
+    page = Number(nextPage) || (page + 1)
+  }
+  return { items, truncated }
+}
+// Immich's "current" value for a field (what an in-app manual edit updates) lives in exifInfo —
+// confirmed this is the field the app itself edits, not a separate top-level dateTimeOriginal/
+// latitude/longitude — so reading only exifInfo here is what makes "Immich's edited value wins"
+// true without any client-side reconciliation of two competing values.
+function immichAssetToPoint(asset) {
+  const exif = asset?.exifInfo || {}
+  const lat = typeof exif.latitude === 'number' ? exif.latitude : null
+  const lng = typeof exif.longitude === 'number' ? exif.longitude : null
+  const rawDate = exif.dateTimeOriginal || asset?.fileCreatedAt || asset?.localDateTime || null
+  const date = rawDate ? normalizeDateStr(String(rawDate).slice(0, 10)) : null
+  return {
+    id: asset?.id || null,
+    name: asset?.originalFileName || asset?.exifInfo?.description || null,
+    description: asset?.exifInfo?.description || null,
+    lat, lng, date,
+  }
+}
+
 // ── Follow redirects for a short link, stopping as soon as a wanted pattern shows up ──────────
 // Confirmed against a real instance: a maps.app.goo.gl share-list link's redirect chain is
 // maps.app.goo.gl -> www.google.com/maps/@/data=...!2s<listId>...  -> consent.google.com/ml?... (a
@@ -690,7 +788,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.3.1 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -2052,6 +2150,112 @@ module.exports = definePlugin({
           }
           return { deleted, remaining: refs.slice(i), errors, done: i >= refs.length }
         })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: test credentials ────────────────────────────────────────────────
+    {
+      method: 'POST', path: '/immich/test', auth: true,
+      async handler(req, ctx) {
+        const { baseUrl, apiKey } = await immichSettings(ctx)
+        if (!baseUrl || !apiKey) return safeJson(200, { ok: false, error: 'not_configured' })
+        const result = await tryAttempt(async () => {
+          const res = await immichFetch(ctx, '/server/ping')
+          if (res?.error) return { ok: false, error: res.error }
+          return { ok: true }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: list albums ──────────────────────────────────────────────────────
+    {
+      method: 'POST', path: '/immich/albums', auth: true,
+      async handler(req, ctx) {
+        const result = await tryAttempt(async () => {
+          const albums = await immichFetch(ctx, '/albums')
+          if (albums?.error) return { error: albums.error }
+          const arr = Array.isArray(albums) ? albums : []
+          return {
+            albums: arr.map(a => ({
+              id: a.id,
+              name: a.albumName || 'Untitled album',
+              assetCount: a.assetCount ?? (Array.isArray(a.assets) ? a.assets.length : 0),
+              thumbnailAssetId: a.albumThumbnailAssetId || null,
+            })),
+          }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: browse assets by album, date range, or neither (all photos) ─────
+    // NOT `GET /albums/{id}` for the album case — confirmed against Immich's own OpenAPI spec
+    // that AlbumResponseDto carries no `assets` field at all (only `assetCount`); that response
+    // shape used to be assumed here, which is exactly why every album showed "No photos found".
+    // The real way to list assets — by album, by date range, or with no filter at all — is the
+    // same /search/metadata endpoint with an optional albumIds/takenAfter/takenBefore filter, so
+    // this one route backs all three of the picker's non-free-text tabs (Trip Period, Date Range,
+    // All Photos, Albums) rather than having near-duplicate routes per tab.
+    {
+      method: 'POST', path: '/immich/browse', auth: true,
+      async handler(req, ctx) {
+        const albumId = req.body?.albumId || null
+        const from = req.body?.from || null
+        const to = req.body?.to || null
+        const body = {}
+        if (albumId) body.albumIds = [albumId]
+        if (from) body.takenAfter = from + 'T00:00:00.000Z'
+        if (to) body.takenBefore = to + 'T23:59:59.999Z'
+        const result = await tryAttempt(async () => {
+          const data = await immichPaginatedAssets(ctx, '/search/metadata', body, 8000, 6000)
+          if (data?.error) return { error: data.error }
+          return {
+            assets: data.items.map(a => ({ id: a.id, name: a.originalFileName || null })),
+            truncated: data.truncated,
+          }
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: resolved metadata for one asset (Immich-edited value wins) ───────
+    {
+      method: 'POST', path: '/immich/asset', auth: true,
+      async handler(req, ctx) {
+        const id = req.body?.id
+        if (!id) return safeJson(200, { error: 'id required' })
+        const result = await tryAttempt(async () => {
+          const asset = await immichFetch(ctx, '/assets/' + encodeURIComponent(id))
+          if (asset?.error) return { error: asset.error }
+          return immichAssetToPoint(asset)
+        })
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: fetch the original file bytes for photo-file import ─────────────
+    // Proxied server-side, not fetched from the client, since the sandboxed iframe's egress
+    // allowlist only ever covers this plugin's OWN declared/operator-granted hosts for its own
+    // routes' outbound calls — this route IS that outbound call.
+    {
+      method: 'POST', path: '/immich/asset-original', auth: true,
+      async handler(req, ctx) {
+        const id = req.body?.id
+        if (!id) return safeJson(200, { error: 'id required' })
+        const result = await tryAttempt(() => immichFetchBinary(ctx, '/assets/' + encodeURIComponent(id) + '/original'))
+        return safeJson(200, result)
+      },
+    },
+
+    // ── Immich: fetch a small thumbnail for the picker grid ──────────────────────
+    {
+      method: 'POST', path: '/immich/thumbnail', auth: true,
+      async handler(req, ctx) {
+        const id = req.body?.id
+        if (!id) return safeJson(200, { error: 'id required' })
+        const result = await tryAttempt(() => immichFetchBinary(ctx, '/assets/' + encodeURIComponent(id) + '/thumbnail?size=thumbnail'))
         return safeJson(200, result)
       },
     },

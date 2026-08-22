@@ -695,27 +695,53 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 <style>
 *{box-sizing:border-box;}body{margin:0;padding:0;}
 .page{padding:22px 26px 32px;max-width:860px;margin:0 auto;}
-.plugin-title{font-size:20px;font-weight:800;color:var(--text-primary);margin-bottom:3px;display:flex;align-items:center;gap:10px;}
-.plugin-sub{font-size:13px;color:var(--text-muted);margin-bottom:22px;}
+.plugin-title{font-size:21px;font-weight:800;letter-spacing:-.01em;color:var(--text-primary);margin-bottom:4px;display:flex;align-items:center;gap:12px;}
+.plugin-title-icon{width:36px;height:36px;border-radius:var(--radius-md);background:linear-gradient(135deg,color-mix(in oklch,var(--accent) 16%,transparent),color-mix(in oklch,var(--accent) 6%,transparent));border:1px solid var(--border-primary);display:flex;align-items:center;justify-content:center;color:var(--accent);flex-shrink:0;}
+.plugin-sub{font-size:13px;color:var(--text-muted);margin-bottom:26px;max-width:560px;line-height:1.55;}
 
 /* Steps */
-.step-bar{display:flex;margin-bottom:24px;}
-.sdot{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--text-faint);}
-.sdot.active{color:var(--accent);}
-.sdot.done{color:var(--success);}
-.scircle{width:20px;height:20px;border-radius:50%;border:2px solid currentColor;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;flex-shrink:0;}
+.step-bar{display:flex;margin-bottom:28px;padding:14px 16px;background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:var(--radius-lg);}
+.sdot{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--text-faint);transition:color .2s;}
+.sdot.active{color:var(--text-primary);}
+.sdot.done{color:var(--text-secondary);}
+.scircle{width:24px;height:24px;border-radius:50%;border:2px solid currentColor;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;flex-shrink:0;transition:all .2s;}
 .sdot.done .scircle{background:var(--success);border-color:var(--success);color:#fff;}
-.sdot.active .scircle{background:var(--accent);border-color:var(--accent);color:var(--accent-text);}
-.sconn{flex:1;height:2px;background:var(--border-primary);margin:0 6px;align-self:center;}
+.sdot.active .scircle{background:var(--accent);border-color:var(--accent);color:var(--accent-text);box-shadow:0 0 0 4px color-mix(in oklch,var(--accent) 16%,transparent);}
+.sconn{flex:1;height:2px;background:var(--border-primary);margin:0 10px;align-self:center;border-radius:1px;transition:background .2s;}
 .sconn.done{background:var(--success);}
 
 /* Drop zone */
-.drop-zone{border:2px dashed var(--border-primary);border-radius:var(--radius-lg);padding:28px 20px;text-align:center;cursor:pointer;background:var(--bg-secondary);transition:all .15s;margin-bottom:12px;}
-.drop-zone:hover,.drop-zone.drag{border-color:var(--accent);background:var(--accent-subtle);}
-.drop-title{font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:3px;}
-.drop-hint{font-size:12px;color:var(--text-muted);line-height:1.5;}
-.format-pills{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:8px;}
-.fpill{background:var(--bg-tertiary);border:1px solid var(--border-primary);border-radius:6px;padding:2px 9px;font-size:11px;font-weight:600;color:var(--text-muted);}
+.drop-zone{border:2px dashed var(--border-primary);border-radius:var(--radius-lg);padding:36px 20px;text-align:center;cursor:pointer;background:var(--bg-secondary);transition:all .18s var(--trek-ease);margin-bottom:14px;}
+.drop-zone:hover{border-color:var(--accent);background:var(--accent-subtle);box-shadow:var(--shadow-sm);}
+.drop-zone.drag{border-color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 4px color-mix(in oklch,var(--accent) 14%,transparent);transform:scale(1.005);}
+.drop-icon-badge{width:56px;height:56px;margin:0 auto 14px;border-radius:50%;background:var(--bg-card);border:1px solid var(--border-primary);display:flex;align-items:center;justify-content:center;color:var(--accent);box-shadow:var(--shadow-sm);}
+.drop-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:4px;}
+.drop-hint{font-size:12.5px;color:var(--text-muted);line-height:1.5;}
+.format-pills{display:flex;gap:7px;justify-content:center;flex-wrap:wrap;margin-top:16px;}
+.fpill{background:var(--bg-card);border:1px solid var(--border-primary);border-radius:20px;padding:4px 12px;font-size:11px;font-weight:600;color:var(--text-secondary);box-shadow:var(--shadow-sm);}
+
+/* Source hub — a growable set of "how do you want to bring in data" tabs. Files (drop-zone),
+   Link (paste a share URL), and Connect an app (Immich today; more integrations later) each get
+   their own panel, so a new source type is "add a tab" rather than reshuffling the whole page. */
+.source-hub{border:1px solid var(--border-primary);border-radius:var(--radius-lg);background:var(--bg-card);overflow:hidden;margin-bottom:14px;box-shadow:var(--shadow-sm);}
+.source-tabs{display:flex;gap:2px;padding:10px 10px 0;background:var(--bg-secondary);border-bottom:1px solid var(--border-primary);}
+.source-tab{display:inline-flex;align-items:center;gap:7px;padding:10px 16px;font-size:12.5px;font-weight:600;border:none;cursor:pointer;font-family:inherit;background:transparent;color:var(--text-muted);border-radius:var(--radius-sm) var(--radius-sm) 0 0;transition:all .15s var(--trek-ease);position:relative;top:1px;}
+.source-tab svg{flex-shrink:0;}
+.source-tab:hover:not(.active){color:var(--text-primary);background:var(--bg-hover);}
+.source-tab.active{color:var(--text-primary);background:var(--bg-card);box-shadow:inset 0 2px 0 var(--accent);}
+.source-panel{padding:18px;}
+.source-panel-intro{font-size:12.5px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;}
+
+/* Connect-an-app grid — Immich lives here today; Prism/etc. are placeholders sized identically
+   so wiring up a new integration later is "swap the tile", not "redesign the panel". */
+.apps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;}
+.app-tile{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:14px;border:1px solid var(--border-primary);border-radius:var(--radius-md);background:var(--bg-secondary);cursor:pointer;transition:all .15s var(--trek-ease);text-align:left;}
+.app-tile:hover:not(.disabled){border-color:var(--accent);background:var(--accent-subtle);transform:translateY(-1px);box-shadow:var(--shadow-sm);}
+.app-tile.disabled{cursor:default;opacity:.55;}
+.app-tile-icon{width:34px;height:34px;border-radius:9px;background:var(--bg-card);border:1px solid var(--border-primary);display:flex;align-items:center;justify-content:center;color:var(--accent);flex-shrink:0;}
+.app-tile-name{font-size:13px;font-weight:700;color:var(--text-primary);}
+.app-tile-desc{font-size:11.5px;color:var(--text-muted);line-height:1.4;}
+.app-tile-badge{position:absolute;top:10px;right:10px;font-size:9.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--text-faint);background:var(--bg-tertiary);border:1px solid var(--border-primary);border-radius:20px;padding:2px 7px;}
 
 /* Source cards */
 .sources-grid{display:flex;flex-direction:column;gap:8px;}
@@ -748,9 +774,13 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 .pit-bus,.pit-train,.pit-transfer,.pit-ferry{background:var(--success-soft);color:var(--success);}
 
 /* Trip config */
-.trip-mode-row{display:flex;gap:0;border:1px solid var(--border-primary);border-radius:var(--radius-sm);overflow:hidden;margin-bottom:12px;width:fit-content;}
-.tmode-btn{padding:6px 14px;font-size:12px;font-weight:600;border:none;cursor:pointer;font-family:inherit;background:var(--bg-secondary);color:var(--text-muted);transition:all .12s;}
-.tmode-btn.active{background:var(--text-primary);color:var(--bg-primary);}
+.trip-mode-row{display:flex;gap:2px;border:1px solid var(--border-primary);border-radius:var(--radius-md);overflow:hidden;margin-bottom:12px;width:fit-content;background:var(--bg-secondary);padding:3px;}
+.tmode-btn{padding:7px 16px;font-size:12.5px;font-weight:600;border:none;border-radius:calc(var(--radius-md) - 4px);cursor:pointer;font-family:inherit;background:transparent;color:var(--text-muted);transition:all .15s var(--trek-ease);}
+.tmode-btn:hover:not(.active){color:var(--text-primary);}
+.tmode-btn.active{background:var(--bg-card);color:var(--text-primary);box-shadow:var(--shadow-sm);}
+.immich-thumb-tile{display:flex;flex-direction:column;align-items:stretch;gap:5px;width:92px;font-size:10px;padding:5px;border:1px solid var(--border-primary);border-radius:var(--radius-sm);background:var(--bg-card);cursor:pointer;transition:border-color .12s,background .12s;}
+.immich-thumb-tile:hover{background:var(--bg-hover);}
+.immich-thumb-tile.selected{border-color:var(--accent);background:var(--accent-subtle);}
 .field-wrap{margin-bottom:10px;}
 .field-wrap label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text-faint);margin-bottom:5px;}
 .field-input{width:100%;background:var(--bg-input);border:1px solid var(--border-primary);border-radius:var(--radius-sm);padding:8px 11px;color:var(--text-primary);font-size:13px;outline:none;font-family:inherit;}
@@ -783,11 +813,12 @@ select.field-input{cursor:pointer;}
 .result-item{font-size:12.5px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;}
 
 /* Buttons */
-.btn-p{background:var(--accent);border:none;border-radius:var(--radius-sm);padding:9px 22px;color:var(--accent-text);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;transition:background .12s;}
+.btn-p{background:var(--accent);border:none;border-radius:var(--radius-sm);padding:10px 24px;color:var(--accent-text);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:var(--shadow-sm);transition:background .12s,transform .08s var(--trek-ease-quint);}
 .btn-p:hover:not(:disabled){background:var(--accent-hover);}
+.btn-p:active:not(:disabled){transform:scale(.97);}
 .btn-p:disabled{opacity:.5;cursor:default;}
-.btn-s{background:var(--bg-secondary);border:1px solid var(--border-primary);border-radius:var(--radius-sm);padding:8px 16px;color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;}
-.btn-s:hover{background:var(--bg-hover);}
+.btn-s{background:var(--bg-card);border:1px solid var(--border-primary);border-radius:var(--radius-sm);padding:9px 17px;color:var(--text-secondary);font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:var(--shadow-sm);transition:background .12s,border-color .12s;}
+.btn-s:hover{background:var(--bg-hover);border-color:color-mix(in oklch,var(--accent) 30%,var(--border-primary));}
 .btn-row{display:flex;gap:8px;margin-top:16px;align-items:center;}
 .st{font-size:13px;color:var(--text-muted);padding:6px 0;}
 .et{font-size:13px;color:var(--danger);padding:6px 0;}
@@ -796,7 +827,7 @@ select.field-input{cursor:pointer;}
 <body>
 <div class="page">
 <div class="plugin-title">
-  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3"/><path d="M4 12H2"/><path d="M10 12H8"/><path d="M16 12h-2"/><path d="M22 12h-2"/></svg>
+  <span class="plugin-title-icon"><svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3"/><path d="M4 12H2"/><path d="M10 12H8"/><path d="M16 12h-2"/><path d="M22 12h-2"/></svg></span>
   Trip Importer
 </div>
 <div class="plugin-sub">Reconstruct a complete past trip from Polarsteps exports, booking PDFs, GPS photos and expense CSVs</div>
@@ -825,28 +856,118 @@ select.field-input{cursor:pointer;}
     <button class="tmode-btn" id="im-collection" onclick="setImportMode('collection')">Import into a Collection</button>
   </div>
   <div id="collection-mode-hint" style="display:none;font-size:11px;color:var(--text-faint);margin:-8px 0 14px;">Saves places into one of your Collections (a saved-place list, independent of any trip) — no trip, no dates, no days. Good for a Google Maps saved-places export, a KML custom map, or a plain CSV place list.</div>
-  <div class="drop-zone" id="dz">
-    <div style="margin-bottom:10px;color:var(--text-muted);">
-      <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+  <!-- Source hub: one tab per "way to bring in data". Files today is the drop-zone; Link is the
+       Google/Naver shared-list resolver; Connect an app is a grid of integration tiles (Immich
+       live, others as placeholders) — adding a new source type later means adding a tab and/or
+       an app tile, not restructuring this page. -->
+  <div class="source-hub">
+    <div class="source-tabs" role="tablist">
+      <button class="source-tab active" id="stab-files" onclick="setSourceTab('files')" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8.5L13.5 2z"/><path d="M13.5 2v6H20"/></svg>
+        Files
+      </button>
+      <button class="source-tab" id="stab-link" onclick="setSourceTab('link')" role="tab" style="display:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        Link
+      </button>
+      <button class="source-tab" id="stab-apps" onclick="setSourceTab('apps')" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.997 4a2 2 0 0 1 1.76 1.05l.486.9A2 2 0 0 0 18.003 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.997a2 2 0 0 0 1.759-1.048l.489-.904A2 2 0 0 1 10.004 4z"/><circle cx="12" cy="13" r="3"/></svg>
+        Connect an app
+      </button>
     </div>
-    <div class="drop-title">Drop your trip files here</div>
-    <div class="drop-hint">Drop any combination of files — the importer will figure out what each one is</div>
-    <div class="format-pills">
-      <span class="fpill">Polarsteps ZIP or trip.json</span>
-      <span class="fpill">Booking PDFs / emails</span>
-      <span class="fpill">Photos (JPG/PNG with GPS)</span>
-      <span class="fpill">Expenses CSV</span>
-      <span class="fpill">Google Maps Timeline JSON</span>
+
+    <div class="source-panel" id="spanel-files">
+      <div class="drop-zone" id="dz">
+        <div class="drop-icon-badge">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+        </div>
+        <div class="drop-title">Drop your trip files here</div>
+        <div class="drop-hint">Drop any combination of files — the importer will figure out what each one is</div>
+        <div class="format-pills">
+          <span class="fpill">Polarsteps ZIP or trip.json</span>
+          <span class="fpill">Booking PDFs / emails</span>
+          <span class="fpill">Photos (JPG/PNG with GPS)</span>
+          <span class="fpill">Expenses CSV</span>
+          <span class="fpill">Google Maps Timeline JSON</span>
+        </div>
+      </div>
+      <input type="file" id="fi" multiple accept=".zip,.json,.pdf,.txt,.eml,.jpg,.jpeg,.png,.csv,.tsv,.xlsx,.gpx,.kml,.kmz,.ics" style="display:none"/>
+    </div>
+
+    <!-- Collection mode only: a shared Google Maps or Naver Maps list link, resolved server-side
+         (see /parse-google-list, /parse-naver-list) instead of requiring a file export at all. -->
+    <div class="source-panel" id="spanel-link" style="display:none;">
+      <div class="source-panel-intro">Paste a shared Google Maps or Naver Maps list link — no export file needed.</div>
+      <div id="collection-link-row" style="display:flex;gap:8px;">
+        <input type="text" id="collection-link-input" placeholder="https://maps.app.goo.gl/… or https://naver.me/…" class="field-input" style="flex:1;"/>
+        <button class="btn-s" id="collection-link-btn" onclick="doImportListLink()">Fetch list</button>
+      </div>
+    </div>
+
+    <!-- Available in both Trip and Collection mode: pick photos/albums straight from a self-hosted
+         Immich server instead of exporting/dragging files. In Trip mode, picks feed the SAME
+         clusterGpsPhotosClient() pipeline as dropped EXIF photos (parsed._gpsRawPoints), so they
+         show up as ordinary GPS-photo places. In Collection mode, picks are pushed as individual,
+         unclustered places into parsedCollection.places (see immichConfirmAdd()) — each Immich
+         photo becomes its own saved place, same as any other Collection-mode source. Prism and
+         any future app integration slot in here as another .app-tile — same card shape, same
+         "click to open its own modal" pattern already proven by Immich. -->
+    <div class="source-panel" id="spanel-apps" style="display:none;">
+      <div class="apps-grid">
+        <div class="app-tile" id="immich-open-btn" onclick="openImmichPanel()">
+          <div class="app-tile-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.997 4a2 2 0 0 1 1.76 1.05l.486.9A2 2 0 0 0 18.003 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.997a2 2 0 0 0 1.759-1.048l.489-.904A2 2 0 0 1 10.004 4z"/><circle cx="12" cy="13" r="3"/></svg></div>
+          <div class="app-tile-name">Immich</div>
+          <div class="app-tile-desc">Browse albums, dates or your whole library on a self-hosted Immich server</div>
+        </div>
+        <div class="app-tile disabled" title="Have a source in mind? Nothing to click yet.">
+          <div class="app-tile-icon">+</div>
+          <div class="app-tile-name">More sources</div>
+          <div class="app-tile-desc">More integrations land here over time</div>
+        </div>
+      </div>
     </div>
   </div>
-  <input type="file" id="fi" multiple accept=".zip,.json,.pdf,.txt,.eml,.jpg,.jpeg,.png,.csv,.tsv,.xlsx,.gpx,.kml,.kmz,.ics" style="display:none"/>
-  <!-- Collection mode only: a shared Google Maps or Naver Maps list link, resolved server-side
-       (see /parse-google-list, /parse-naver-list) instead of requiring a file export at all. -->
-  <div id="collection-link-row" style="display:none;margin-top:14px;">
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Or paste a shared Google Maps or Naver Maps list link:</div>
-    <div style="display:flex;gap:8px;">
-      <input type="text" id="collection-link-input" placeholder="https://maps.app.goo.gl/… or https://naver.me/…" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-elevated);color:var(--text-primary);font-size:13px;"/>
-      <button class="btn-s" id="collection-link-btn" onclick="doImportListLink()">Fetch list</button>
+  <!-- Full modal overlay, not an inline panel — mirrors the Immich-picker UX shape (tabs for how
+       to browse, a select-all toggle, a photo grid, a summary+Cancel/Add footer) users are
+       already familiar with from other apps. Plain fixed-position CSS, not window.*() modal APIs
+       (the sandboxed iframe has no allow-modals — see trekConfirm() above for why those are
+       unusable here anyway). -->
+  <div id="immich-modal-overlay" class="trek-backdrop-enter" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center;padding:16px;">
+    <div id="immich-modal" class="trek-modal-enter" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-primary);width:min(760px,94vw);max-height:88vh;border-radius:var(--radius-lg);display:flex;flex-direction:column;overflow:hidden;box-shadow:var(--shadow-lg);">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border-primary);flex-shrink:0;">
+        <div style="font-weight:700;font-size:15px;display:inline-flex;align-items:center;gap:8px;"><svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.997 4a2 2 0 0 1 1.76 1.05l.486.9A2 2 0 0 0 18.003 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.997a2 2 0 0 0 1.759-1.048l.489-.904A2 2 0 0 1 10.004 4z"/><circle cx="12" cy="13" r="3"/></svg> Import from Immich</div>
+        <button onclick="closeImmichPanel()" style="background:none;border:none;font-size:16px;line-height:1;cursor:pointer;color:var(--text-muted);padding:4px;">✕</button>
+      </div>
+      <div style="padding:14px 20px 0;flex-shrink:0;">
+        <div class="trip-mode-row" style="margin-bottom:0;">
+          <button class="tmode-btn" id="immich-tab-albums" onclick="immichSetTab('albums')">Albums</button>
+          <button class="tmode-btn" id="immich-tab-range" onclick="immichSetTab('range')">Date Range</button>
+          <button class="tmode-btn" id="immich-tab-all" onclick="immichSetTab('all')">All Photos</button>
+        </div>
+      </div>
+      <div id="immich-range-row" style="display:none;align-items:center;gap:8px;padding:14px 20px;flex-shrink:0;font-size:12px;">
+        <span style="color:var(--text-faint);display:inline-flex;"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v3"/><path d="M16 2v3"/><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg></span>
+        <input type="date" id="immich-date-from" class="field-input" style="width:auto;padding:6px 8px;"/>
+        <span style="color:var(--text-faint);">—</span>
+        <input type="date" id="immich-date-to" class="field-input" style="width:auto;padding:6px 8px;"/>
+        <button class="btn-s" onclick="immichLoadRange()">Load</button>
+        <span id="immich-range-hint" style="color:var(--text-muted);"></span>
+      </div>
+      <div id="immich-albums-list" style="display:none;padding:12px 20px;font-size:12px;color:var(--text-muted);border-bottom:1px solid var(--border-primary);flex-shrink:0;max-height:120px;overflow:auto;"></div>
+      <div style="display:flex;align-items:center;padding:14px 20px 8px;flex-shrink:0;">
+        <label style="display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--text-secondary);cursor:pointer;">
+          <input type="checkbox" id="immich-select-all-cb" onchange="immichToggleSelectAll(this.checked)" style="accent-color:var(--accent);width:15px;height:15px;"/>
+          <span id="immich-select-all-label">Select all (0)</span>
+        </label>
+      </div>
+      <div id="immich-assets-grid" style="flex:1;overflow:auto;display:flex;flex-wrap:wrap;gap:8px;padding:4px 20px 16px;min-height:160px;color:var(--text-muted);font-size:12px;"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-top:1px solid var(--border-primary);flex-shrink:0;background:var(--bg-secondary);">
+        <span id="immich-selected-count" style="font-size:12px;font-weight:600;color:var(--text-secondary);">0 selected</span>
+        <div class="btn-row" style="margin:0;">
+          <button class="btn-s" onclick="closeImmichPanel()">Cancel</button>
+          <button class="btn-p" id="immich-add-btn" onclick="immichConfirmAdd()">Add</button>
+        </div>
+      </div>
     </div>
   </div>
   <div id="st1-status" class="st" style="display:none;"></div>
@@ -1039,7 +1160,7 @@ window.addEventListener('message',function(e){
 
 // ── State ──────────────────────────────────────────────────────────────────
 var files=[],imgFiles=[];
-var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+var parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[],_gpsRawPoints:[],_immichRawPoints:[]};
 var previewOpenSources={};
 var tripMode='new';
 var tripTargets=[]; // computeTripTargets() result — the source of truth once step 3 is entered
@@ -1052,12 +1173,23 @@ var parsedCollection={places:[]}; // {name,lat,lng,address,notes,date,_selected,
 var collectionMode='new'; // 'new' | 'existing'
 var existingCollections=[];
 
+var sourceTab='files';
+function setSourceTab(tab){
+  sourceTab=tab;
+  ['files','link','apps'].forEach(function(t){
+    document.getElementById('stab-'+t).className='source-tab'+(t===tab?' active':'');
+    document.getElementById('spanel-'+t).style.display=t===tab?'':'none';
+  });
+}
+
 function setImportMode(mode){
   importMode=mode;
   document.getElementById('im-trip').className='tmode-btn'+(mode==='trip'?' active':'');
   document.getElementById('im-collection').className='tmode-btn'+(mode==='collection'?' active':'');
   document.getElementById('collection-mode-hint').style.display=mode==='collection'?'':'none';
-  document.getElementById('collection-link-row').style.display=mode==='collection'?'':'none';
+  document.getElementById('stab-link').style.display=mode==='collection'?'':'none';
+  if(mode!=='collection'&&sourceTab==='link')setSourceTab('files');
+  closeImmichPanel();
   document.getElementById('trip-step3-fields').style.display=mode==='collection'?'none':'';
   document.getElementById('collection-config').style.display=mode==='collection'?'block':'none';
 }
@@ -1176,7 +1308,12 @@ async function doAnalyze(){
   if(importMode==='collection')return doAnalyzeCollection();
   var btn=document.getElementById('analyze-btn');btn.disabled=true;
   showSt1('Reading files…','');
-  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  // Immich picks (openImmichPanel()) are independent of the dropped-files list this function
+  // scans, so they must survive this reset — otherwise re-running Analyze after adding files
+  // would silently drop any photos already picked from Immich.
+  var _keepImmichPoints=parsed._immichRawPoints||[];
+  parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[],_gpsRawPoints:[],_immichRawPoints:[]};
+  parsed._immichRawPoints=_keepImmichPoints;
   previewOpenSources={};
 
   var zipFiles=[],jsonFiles=[],pdfFiles=[],txtFiles=[],csvFiles=[],gpxFiles=[],kmlFiles=[],kmzFiles=[],icsFiles=[];
@@ -1419,6 +1556,11 @@ async function doAnalyze(){
     }
     if(gpsNone)console.log('[trip-importer]',gpsNone,'of',imgFilesToScan.length,'photos had no usable GPS/EXIF data (e.g. screenshots) — skipped');
   }
+  // Immich picks (added via openImmichPanel(), independent of dropped files) merge into the
+  // SAME clustering pass rather than a parallel one — see immichConfirmAdd().
+  var immichPoints=(parsed._immichRawPoints||[]);
+  gpsData=gpsData.concat(immichPoints);
+  parsed._gpsRawPoints=gpsData;
   if(gpsData.length){
     parsed.gpsPlaces=clusterGpsPhotosClient(gpsData);
   }
@@ -1692,6 +1834,301 @@ async function doImportListLink(){
     notifyUser('Could not fetch that list: '+e.message,'warning');
   }
   btn.disabled=false;btn.textContent=origText;
+}
+
+// ── Immich photo picker (Trip mode) ─────────────────────────────────────────
+// Additive, like doImportListLink() above: does not reset anything doAnalyze() already
+// gathered from dropped files. parsed._gpsRawPoints is the raw (pre-clustering) point list —
+// doAnalyze() also writes into it (see the gpsData handling around clusterGpsPhotosClient()) —
+// so an Immich pick merges into the SAME clusterGpsPhotosClient() pass as EXIF photos rather
+// than producing a second, parallel place list.
+var immichSelected={},immichCurrentAssets=[];
+// Every /immich/* call is routed through this instead of invoke() directly, serializing them to
+// ONE in-flight request at a time. Confirmed against a real instance: clicking through albums or
+// scrolling fast enough to fire several thumbnail fetches at once caused ctx.settings.get() to
+// intermittently return undefined for one of the concurrent calls, surfacing a false
+// {error:'not_configured'} even though the settings ARE saved — a server-side retry alone wasn't
+// reliably enough headroom. Removing the concurrency removes the trigger entirely rather than
+// racing a fixed retry delay against it. Chained on the queue itself (not per-call try/catch) so
+// one failed request can't wedge the chain and stall everything queued after it.
+var immichReqQueue=Promise.resolve();
+function immichInvoke(path,body){
+  var result=immichReqQueue.then(function(){return invoke(path,'POST',body);});
+  immichReqQueue=result.catch(function(){});
+  return result;
+}
+async function openImmichPanel(){
+  var overlay=document.getElementById('immich-modal-overlay');
+  var test=await immichInvoke('/immich/test',{});
+  if(!test||!test.ok){
+    notifyUser(test&&test.error==='not_configured'?
+      'Set your Immich server URL and API key in this plugin\'s Settings first.':
+      'Could not connect to Immich: '+((test&&test.error)||'unknown error'),'warning');
+    return;
+  }
+  overlay.style.display='flex';
+  immichSetTab('albums');
+}
+function closeImmichPanel(){
+  var overlay=document.getElementById('immich-modal-overlay');
+  if(overlay)overlay.style.display='none';
+}
+// Best-effort trip date range used to pre-fill the Date Range tab — the Immich picker lives on
+// Step 1, before the trip's own start/end date fields (#trip-start/#trip-end, filled in on Step
+// 3) are necessarily set, so this falls back to whatever doAnalyze() has already parsed. Mirrors
+// the same min/max-across-sources approach prepareStep3()/computeTripTargets() already use for
+// the same "no explicit trip range yet" situation, applied here to `parsed` directly since Immich
+// picking isn't scoped to one already-computed trip target.
+function immichGuessTripDates(){
+  var startEl=document.getElementById('trip-start'),endEl=document.getElementById('trip-end');
+  if(startEl&&startEl.value&&endEl&&endEl.value)return{from:startEl.value,to:endEl.value};
+  var isoDateRe=/^\d{4}-\d{2}-\d{2}$/;
+  var allDates=[];
+  (parsed.polarstepsAll||[]).forEach(function(t){(t.steps||[]).forEach(function(s){
+    if(isoDateRe.test(s.date))allDates.push(s.date);
+    if(isoDateRe.test(s.endDate))allDates.push(s.endDate);
+  });});
+  (parsed.bookings||[]).forEach(function(b){if(isoDateRe.test(b.from_date))allDates.push(b.from_date);if(isoDateRe.test(b.to_date))allDates.push(b.to_date);});
+  (parsed.gpsPlaces||[]).forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+  (parsed.timelinePlaces||[]).forEach(function(c){if(isoDateRe.test(c.date))allDates.push(c.date);});
+  (parsed.expenses||[]).forEach(function(e){if(isoDateRe.test(e.date))allDates.push(e.date);});
+  allDates.sort();
+  return allDates.length?{from:allDates[0],to:allDates[allDates.length-1]}:null;
+}
+function immichSetTab(tab){
+  ['range','all','albums'].forEach(function(t){
+    document.getElementById('immich-tab-'+t).className='tmode-btn'+(t===tab?' active':'');
+  });
+  document.getElementById('immich-range-row').style.display=tab==='range'?'flex':'none';
+  document.getElementById('immich-albums-list').style.display=tab==='albums'?'':'none';
+  if(tab==='range'){
+    // Pre-fill with a best-effort guess from whatever's already known about the trip (see
+    // immichGuessTripDates()) instead of a separate "Trip Period" tab for the same thing — one
+    // tab that starts smart beats two tabs a user has to figure out the difference between.
+    var fromEl=document.getElementById('immich-date-from'),toEl=document.getElementById('immich-date-to');
+    var rangeHint=document.getElementById('immich-range-hint');
+    if(!fromEl.value&&!toEl.value){
+      var guess=immichGuessTripDates();
+      if(guess){
+        fromEl.value=guess.from;toEl.value=guess.to;
+        rangeHint.textContent='(from your trip dates — adjust if needed)';
+        immichLoadRange();
+        return;
+      }
+    }
+    rangeHint.textContent='';
+    if(fromEl.value&&toEl.value)immichLoadRange();
+    else renderImmichAssets([]);
+  }else if(tab==='all'){
+    immichLoadBrowse({});
+  }else if(tab==='albums'){
+    immichLoadAlbums();
+    renderImmichAssets([]);
+  }
+}
+async function immichLoadAlbums(){
+  var list=document.getElementById('immich-albums-list');
+  list.textContent='Loading albums…';
+  var result=await immichInvoke('/immich/albums',{});
+  if(!result||result.error){list.textContent='Could not load albums.';return;}
+  var albums=result.albums||[];
+  if(!albums.length){list.textContent='No albums found.';return;}
+  list.innerHTML='';
+  albums.forEach(function(a){
+    var btn=document.createElement('button');
+    btn.className='btn-s';
+    btn.style.margin='2px';
+    btn.textContent=a.name+' ('+a.assetCount+')';
+    btn.onclick=function(){immichLoadBrowse({albumId:a.id});};
+    list.appendChild(btn);
+  });
+}
+function immichLoadRange(){
+  var from=document.getElementById('immich-date-from').value;
+  var to=document.getElementById('immich-date-to').value;
+  if(!from||!to){notifyUser('Pick both a start and end date first.','warning');return;}
+  immichLoadBrowse({from:from,to:to});
+}
+// Bumped on every browse call — lets an in-flight request whose response arrives after a NEWER
+// one was already started (e.g. clicking several albums, or switching tabs, in quick succession)
+// detect it's stale and get discarded instead of overwriting the grid with the wrong (or
+// now-irrelevant) results, or double-reporting a transient error for a request the user has
+// already moved past.
+var immichLoadEpoch=0;
+async function immichLoadBrowse(filter){
+  var epoch=++immichLoadEpoch;
+  var grid=document.getElementById('immich-assets-grid');
+  renderImmichAssets([]);
+  grid.textContent='Loading photos…';
+  var result=await immichInvoke('/immich/browse',filter);
+  if(epoch!==immichLoadEpoch)return;
+  renderImmichAssets(result&&!result.error?result.assets:[]);
+  if(result&&result.error)notifyUser(result.error,'warning');
+  else if(result&&result.truncated)notifyUser('That\'s a lot of photos — only the first '+result.assets.length+' loaded. "Select all" only covers those.','warning');
+}
+function renderImmichAssets(assets){
+  assets=assets||[];
+  immichCurrentAssets=assets;
+  var grid=document.getElementById('immich-assets-grid');
+  grid.innerHTML='';
+  immichUpdateSelectAllCheckbox();
+  if(!assets.length){grid.textContent='No photos found.';return;}
+  assets.forEach(function(a){
+    var label=document.createElement('label');
+    label.className='immich-thumb-tile'+(immichSelected[a.id]?' selected':'');
+    var thumb=document.createElement('div');
+    thumb.id='immich-thumb-'+a.id;
+    thumb.dataset.assetId=a.id;
+    thumb.style.cssText='width:80px;height:80px;background:var(--bg-secondary);border-radius:6px;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:9px;overflow:hidden;';
+    thumb.textContent='…';
+    label.appendChild(thumb);
+    var row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:4px;';
+    var cb=document.createElement('input');
+    cb.type='checkbox';
+    cb.style.accentColor='var(--accent)';
+    cb.checked=!!immichSelected[a.id];
+    cb.onchange=function(){
+      if(cb.checked)immichSelected[a.id]=a;else delete immichSelected[a.id];
+      label.classList.toggle('selected',cb.checked);
+      immichUpdateSelectedCount();
+    };
+    row.appendChild(cb);
+    var span=document.createElement('span');
+    span.textContent=a.name||a.id;
+    span.title=a.name||a.id;
+    span.style.cssText='overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;color:var(--text-secondary);';
+    row.appendChild(span);
+    label.appendChild(row);
+    grid.appendChild(label);
+  });
+  immichObserveThumbnails();
+  immichUpdateSelectedCount();
+}
+// Single "Select all (N)" checkbox (matches the reference UI) rather than separate select/
+// deselect buttons — selects/deselects every currently-loaded result (an album/date-range page),
+// not just what's scrolled into view, since most of a large album is below the fold given the
+// grid's scroll height.
+function immichToggleSelectAll(checked){
+  immichCurrentAssets.forEach(function(a){if(checked)immichSelected[a.id]=a;else delete immichSelected[a.id];});
+  document.querySelectorAll('#immich-assets-grid .immich-thumb-tile').forEach(function(tile){
+    tile.classList.toggle('selected',checked);
+    var cb=tile.querySelector('input[type=checkbox]');
+    if(cb)cb.checked=checked;
+  });
+  immichUpdateSelectedCount();
+}
+function immichUpdateSelectAllCheckbox(){
+  var cb=document.getElementById('immich-select-all-cb');
+  var label=document.getElementById('immich-select-all-label');
+  if(!cb||!label)return;
+  var n=immichCurrentAssets.length;
+  var allSelected=n>0&&immichCurrentAssets.every(function(a){return !!immichSelected[a.id];});
+  cb.checked=allSelected;
+  cb.disabled=!n;
+  label.textContent='Select all ('+n+')';
+}
+function immichUpdateSelectedCount(){
+  var n=Object.keys(immichSelected).length;
+  var el=document.getElementById('immich-selected-count');
+  if(el)el.textContent=n+' selected';
+  immichUpdateSelectAllCheckbox();
+}
+// Lazy-load thumbnails as they scroll into view, instead of fetching every result up front —
+// a search/album can return far more assets than fit in the grid's visible ~220px scroll area,
+// and eagerly fetching all of them fires one outbound request per photo through the plugin's own
+// server (each hitting the user's Immich server) for images the user may never scroll to.
+// IntersectionObserver's `root` is set to the grid itself (not the page), since the grid — not
+// the page — is what actually scrolls (overflow:auto, fixed max-height).
+// rootMargin is intentionally tiny (not the ~200px first tried) — with items ~86px tall wrapping
+// several per row, a 200px margin on top of the ~220px visible area counted as "in view" for
+// roughly 6-7 rows at once (confirmed: ~48 thumbnails fired immediately on open, the rest never
+// got a trigger until an actual scroll happened far enough to cross that oversized margin).
+// Only bounds how many thumbnail requests are QUEUED as pending at once — immichInvoke() above
+// still serializes their actual execution to one at a time, so this no longer controls real
+// network concurrency (it did before immichInvoke() existed). Left >1 anyway so several requests
+// can be queued ahead of the network as items scroll into view, instead of only queuing one at a
+// time and leaving the pipe briefly idle between each.
+var IMMICH_THUMB_CONCURRENCY=3;
+var immichThumbQueue=[],immichThumbInFlight=0,immichThumbObserver=null;
+function immichObserveThumbnails(){
+  immichThumbQueue=[];
+  if(immichThumbObserver)immichThumbObserver.disconnect();
+  var grid=document.getElementById('immich-assets-grid');
+  immichThumbObserver=new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if(!entry.isIntersecting)return;
+      immichThumbObserver.unobserve(entry.target);
+      immichThumbQueue.push(entry.target.dataset.assetId);
+      immichPumpThumbQueue();
+    });
+  },{root:grid,rootMargin:'24px 0px',threshold:0.01});
+  grid.querySelectorAll('[data-asset-id]').forEach(function(el){immichThumbObserver.observe(el);});
+}
+function immichPumpThumbQueue(){
+  while(immichThumbInFlight<IMMICH_THUMB_CONCURRENCY&&immichThumbQueue.length){
+    var id=immichThumbQueue.shift();
+    immichThumbInFlight++;
+    immichInvoke('/immich/thumbnail',{id:id}).then(function(assetId){return function(res){
+      var el=document.getElementById('immich-thumb-'+assetId);
+      if(el&&res&&res.base64&&!res.error){
+        var img=document.createElement('img');
+        img.src='data:'+(res.mimetype||'image/jpeg')+';base64,'+res.base64;
+        img.style.cssText='width:100%;height:100%;object-fit:cover;';
+        el.innerHTML='';el.appendChild(img);
+      }else if(el){el.textContent='—';}
+    };}(id)).catch(function(assetId){return function(){
+      var el=document.getElementById('immich-thumb-'+assetId);
+      if(el)el.textContent='—';
+    };}(id)).finally(function(){immichThumbInFlight--;immichPumpThumbQueue();});
+  }
+}
+async function immichConfirmAdd(){
+  var ids=Object.keys(immichSelected);
+  if(!ids.length){notifyUser('Select at least one photo first.','warning');return;}
+  var btn=document.getElementById('immich-add-btn');
+  var origText=btn.textContent;
+  btn.disabled=true;btn.textContent='Adding…';
+  var points=[],skipped=0;
+  for(var i=0;i<ids.length;i++){
+    var res=await immichInvoke('/immich/asset',{id:ids[i]});
+    if(res&&!res.error&&typeof res.lat==='number'&&typeof res.lng==='number'){
+      points.push({id:ids[i],name:res.name||null,lat:res.lat,lng:res.lng,date:res.date||null});
+    }else skipped++;
+  }
+  btn.disabled=false;btn.textContent=origText;
+  if(!points.length){notifyUser('None of the selected photos had usable GPS data.','warning');return;}
+  if(importMode==='collection'){
+    // Unlike the Trip-mode path below, Collection places are never clustered (CLAUDE.md: each
+    // Collection source produces its own distinct places, since clustering would wrongly merge
+    // differently-named nearby places) — one Immich photo becomes exactly one place. A photo's
+    // filename isn't a usable place name, so it's deliberately left null: /import-collection
+    // already reverse-geocodes any place with no name (or a generic placeholder), same as it
+    // does for other nameless Collection sources.
+    points.forEach(function(p){
+      parsedCollection.places.push({name:null,lat:p.lat,lng:p.lng,address:null,notes:null,date:p.date,_selected:true,_source:'Immich'});
+    });
+    immichSelected={};
+    closeImmichPanel();
+    notifyUser('Added '+points.length+' photo'+(points.length===1?'':'s')+' from Immich'+(skipped?' ('+skipped+' skipped, no GPS)':''),'info');
+    renderCollectionPreview();
+    goStep(2);
+    return;
+  }
+  points.forEach(function(p){p.name=p.name||('Immich photo '+p.id);p.photoCount=1;p._source='immich';p._immichAssetId=p.id;});
+  // _immichRawPoints is the accumulator that survives a later/earlier doAnalyze() reset (see
+  // there); _gpsRawPoints is the full combined list actually fed to clusterGpsPhotosClient() —
+  // rebuild it from whatever non-Immich (file-derived) points doAnalyze() last computed, plus
+  // every Immich pick so far, so picking more photos here doesn't require re-running Analyze.
+  parsed._immichRawPoints=(parsed._immichRawPoints||[]).concat(points);
+  var fileDerived=(parsed._gpsRawPoints||[]).filter(function(p){return p._source!=='immich';});
+  parsed._gpsRawPoints=fileDerived.concat(parsed._immichRawPoints);
+  parsed.gpsPlaces=clusterGpsPhotosClient(parsed._gpsRawPoints);
+  immichSelected={};
+  closeImmichPanel();
+  notifyUser('Added '+points.length+' photo'+(points.length===1?'':'s')+' from Immich'+(skipped?' ('+skipped+' skipped, no GPS)':''),'info');
+  renderPreview();
+  goStep(2);
 }
 
 // ── Preview ────────────────────────────────────────────────────────────────
@@ -3574,7 +4011,7 @@ async function doAIAssist(){
 }
 
 function resetAll(){
-  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[]};
+  files=[];imgFiles=[];parsed={polarsteps:null,polarstepsAll:[],bookings:[],gpsPlaces:[],timelinePlaces:[],gpxPlaces:[],kmlPlaces:[],expenses:[],bookingText:'',_stepPhotosByStepId:{},_selectedJourneyIdx:[],_gpsRawPoints:[],_immichRawPoints:[]};
   parsedCollection={places:[]};
   previewOpenSources={};
   tripTargets=[];journeyTargets=[];extraTargets=[];unassigned=null;extraTargetSeq=0;
