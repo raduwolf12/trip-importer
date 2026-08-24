@@ -788,7 +788,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.4.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.4.1 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
