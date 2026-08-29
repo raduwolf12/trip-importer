@@ -795,6 +795,30 @@ select.field-input{cursor:pointer;}
 .opt-item label{font-size:12.5px;color:var(--text-primary);cursor:pointer;font-weight:500;}
 .opt-item.disabled{opacity:.4;cursor:default;}
 
+/* Phone "native feel" (trek:context.viewport.formFactor, TREK 4.0.0) — >=16px inputs so iOS
+   doesn't zoom the page on focus and stay zoomed, and >=44px touch targets on buttons/checkbox
+   rows, per the client-bridge skill's rules. Desktop is untouched. */
+[data-form-factor="phone"] .field-input,
+[data-form-factor="phone"] input[type="text"],
+[data-form-factor="phone"] input[type="date"],
+[data-form-factor="phone"] input[type="password"]{font-size:16px;}
+[data-form-factor="phone"] .btn-p,
+[data-form-factor="phone"] .btn-s{min-height:44px;}
+[data-form-factor="phone"] .opt-item{min-height:44px;}
+/* The 4-step "Upload/Preview/Configure/Import" bar is a fixed-width flex row with
+   non-shrinking text labels (confirmed by screenshotting /ui at a 390px phone viewport via
+   trek:context.viewport — the "Configure"/"Import" labels ran off the right edge of the
+   frame with no wrap and no scroll). Icon-only + tighter spacing keeps the same 4-step
+   affordance without needing the labels to fit. */
+[data-form-factor="phone"] .step-bar{padding:12px 10px;}
+[data-form-factor="phone"] .sdot-label{display:none;}
+[data-form-factor="phone"] .sdot{gap:0;}
+[data-form-factor="phone"] .sconn{margin:0 6px;}
+/* Same screenshot check showed the 2-column "What to import" grid squeezing each label onto
+   two cramped lines at 390px — a single column keeps every row comfortably above the 44px
+   touch-target floor above. */
+[data-form-factor="phone"] .opts-grid{grid-template-columns:1fr;}
+
 /* Progress */
 .prog-list{display:flex;flex-direction:column;gap:8px;}
 .prog-item{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-card);border:1px solid var(--border-primary);border-radius:var(--radius-md);}
@@ -834,13 +858,13 @@ select.field-input{cursor:pointer;}
 
 <!-- Steps -->
 <div class="step-bar">
-  <div class="sdot active" id="dot-1"><div class="scircle" id="dc-1">1</div>Upload</div>
+  <div class="sdot active" id="dot-1"><div class="scircle" id="dc-1">1</div><span class="sdot-label">Upload</span></div>
   <div class="sconn" id="cn-1"></div>
-  <div class="sdot" id="dot-2"><div class="scircle" id="dc-2">2</div>Preview</div>
+  <div class="sdot" id="dot-2"><div class="scircle" id="dc-2">2</div><span class="sdot-label">Preview</span></div>
   <div class="sconn" id="cn-2"></div>
-  <div class="sdot" id="dot-3"><div class="scircle" id="dc-3">3</div>Configure</div>
+  <div class="sdot" id="dot-3"><div class="scircle" id="dc-3">3</div><span class="sdot-label">Configure</span></div>
   <div class="sconn" id="cn-3"></div>
-  <div class="sdot" id="dot-4"><div class="scircle" id="dc-4">4</div>Import</div>
+  <div class="sdot" id="dot-4"><div class="scircle" id="dc-4">4</div><span class="sdot-label">Import</span></div>
 </div>
 
 <!-- Step 1: Upload -->
@@ -1045,7 +1069,7 @@ select.field-input{cursor:pointer;}
        makes the Trip section and every other checkbox below irrelevant (all handled in
        toggleJournalOnly()). -->
   <div class="opt-item" id="opt-journal-only-wrap" style="margin-bottom:14px;">
-    <input type="checkbox" id="opt-journal-only" onchange="toggleJournalOnly()"/>
+    <input type="checkbox" id="opt-journal-only" onchange="toggleJournalOnly();saveWizardPrefs();"/>
     <label for="opt-journal-only">📔 Journal only — just the story, no trip plan</label>
   </div>
   <div id="journal-only-hint" style="display:none;font-size:11px;color:var(--text-faint);margin:-8px 0 14px;">Creates a standalone journal from your Polarsteps data — no trip, no places, no days, no bookings/costs. Good for a travel story you don't need to plan around.</div>
@@ -1053,33 +1077,33 @@ select.field-input{cursor:pointer;}
   <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;">What to import</div>
   <div class="opts-grid">
     <div class="opt-item" id="opt-journal-wrap">
-      <input type="checkbox" id="opt-journal" checked/>
+      <input type="checkbox" id="opt-journal" checked onchange="saveWizardPrefs()"/>
       <label for="opt-journal">📔 Polarsteps journal entries</label>
     </div>
     <div class="opt-item" id="opt-places-wrap">
-      <input type="checkbox" id="opt-places" checked/>
+      <input type="checkbox" id="opt-places" checked onchange="saveWizardPrefs()"/>
       <label for="opt-places">📍 Places & GPS locations</label>
     </div>
     <div class="opt-item" id="opt-bookings-wrap">
-      <input type="checkbox" id="opt-bookings" checked/>
+      <input type="checkbox" id="opt-bookings" checked onchange="saveWizardPrefs()"/>
       <label for="opt-bookings">✈️ Transport &amp; hotel bookings</label>
     </div>
     <div class="opt-item" id="opt-costs-wrap">
-      <input type="checkbox" id="opt-costs" checked/>
+      <input type="checkbox" id="opt-costs" checked onchange="saveWizardPrefs()"/>
       <label for="opt-costs">💸 Expenses from CSV</label>
     </div>
     <div class="opt-item" id="opt-daynotes-wrap">
-      <input type="checkbox" id="opt-daynotes" checked/>
+      <input type="checkbox" id="opt-daynotes" checked onchange="saveWizardPrefs()"/>
       <label for="opt-daynotes">📅 Day notes in planner</label>
     </div>
     <div class="opt-item" id="opt-photos-wrap">
-      <input type="checkbox" id="opt-photos"/>
+      <input type="checkbox" id="opt-photos" onchange="saveWizardPrefs()"/>
       <label for="opt-photos">🖼️ Upload photos to trip files</label>
     </div>
   </div>
   <div class="field-wrap" id="currency-wrap" style="margin-top:14px;display:none;">
     <label>Default currency <span style="font-weight:400;color:var(--text-muted);">— used for any cost or booking price where no currency was detected in the source file</span></label>
-    <select class="field-input" id="opt-currency" data-trek-native>
+    <select class="field-input" id="opt-currency" data-trek-native onchange="saveWizardPrefs()">
       <option value="EUR">EUR — Euro</option>
       <option value="USD">USD — US Dollar</option>
       <option value="GBP">GBP — British Pound</option>
@@ -1119,6 +1143,26 @@ function invoke(path,method,body){
     window.parent.postMessage({type:'trek:invoke',requestId:id,sub:path,method:method||'GET',body:body},'*');
   });
 }
+// window.trek.session bridge, hand-rolled (this file doesn't use the vendored design-kit's
+// window.trek — see the CLAUDE.md note on the two parallel bridges — so its session.get/set
+// sugar isn't wired up either). scope:'plugin' only: scope:'trip' fails with NO_TRIP_CONTEXT
+// for a `page`-type plugin, which never has a trip in view. Best-effort — an older host that
+// doesn't understand trek:session:* would just never answer, so every call races a short
+// timeout rather than hanging a pending promise forever; failures resolve undefined/false
+// instead of throwing, since nothing here should block the wizard on session storage.
+function sessionReq(type,extra){
+  return new Promise(function(res){
+    var id='sx'+(++seq);
+    var settled=false;
+    pending[id]={resolve:function(v){if(!settled){settled=true;res(v);}},reject:function(){if(!settled){settled=true;res(undefined);}}};
+    var msg={type:type,requestId:id,scope:'plugin'};
+    for(var k in extra)msg[k]=extra[k];
+    window.parent.postMessage(msg,'*');
+    setTimeout(function(){if(!settled){settled=true;delete pending[id];res(undefined);}},1500);
+  });
+}
+function sessionGet(key){return sessionReq('trek:session:get',{key:key});}
+function sessionSet(key,value){return sessionReq('trek:session:set',{key:key,value:value});}
 // The sandboxed frame has no allow-modals, so plain confirm()/alert() are no-ops in the real
 // host (only in an unsandboxed dev preview) — ask the host to render its native confirm instead.
 function trekConfirm(message,opts){
@@ -2593,7 +2637,11 @@ async function prepareStep3(){
   setOptAvail('opt-bookings-wrap',tripTargets.some(function(t){return t.bookings.length>0;})||un.bookings.length>0);
   setOptAvail('opt-costs-wrap',tripTargets.some(function(t){return t.expenses.length>0;})||un.expenses.length>0);
   setOptAvail('opt-daynotes-wrap',anyJourney);
-  setOptAvail('opt-photos-wrap',imgFiles.length>0);
+  // imgFiles alone only counts loose dropped photos — a Polarsteps ZIP's own embedded step
+  // photos (parsed._stepPhotosByStepId) never touch that array, so a ZIP-only import used to
+  // leave this checkbox disabled even though there were photos to import (into the journal
+  // entry, if nothing else).
+  setOptAvail('opt-photos-wrap',imgFiles.length>0||Object.keys(parsed._stepPhotosByStepId||{}).length>0);
   toggleJournalOnly(); // resync dependent checkbox disabled-states in case availability just changed
 
   // Pre-select the most common currency actually detected in the source data (falls back to
@@ -2903,7 +2951,12 @@ function setOptAvail(id,avail){
 // prepareStep3()/renderTripTargets() — this function only knows about the journalOnly override).
 function toggleJournalOnly(){
   var on=document.getElementById('opt-journal-only').checked;
-  ['opt-places-wrap','opt-bookings-wrap','opt-costs-wrap','opt-daynotes-wrap','opt-photos-wrap'].forEach(function(id){
+  // opt-photos-wrap is deliberately NOT in this list: a step's own embedded ZIP photos still
+  // attach directly into its journal entry via ctx.journal.addEntryPhoto (/attach-entry-photo),
+  // which needs no trip/place at all — only the place-linked upload path (loose imgFiles,
+  // the media-CDN fallback) is meaningless here, and those already no-op on their own
+  // result.tripId guard since journal-only mode never creates a trip.
+  ['opt-places-wrap','opt-bookings-wrap','opt-costs-wrap','opt-daynotes-wrap'].forEach(function(id){
     var el=document.getElementById(id);
     var input=el.querySelector('input');
     if(on){el.classList.add('disabled');input.disabled=true;input.checked=false;}
@@ -3568,9 +3621,17 @@ async function importOneTarget(target,options,progList,isPdfTarget){
   // stepPlaceIds only exists inside the /import response (placeId is never persisted outside
   // that request) — the main loop above already merged every round's progress into `progress`,
   // so by now it holds every step's placeId across the whole (possibly multi-round) import.
+  // Journal-only mode never creates a trip (result.tripId stays null by design — see the
+  // "Journal-only mode" section), but journal entries still get created and still need their
+  // photos attached via /attach-entry-photo, which takes an entryId and needs no tripId at all.
+  // Only the place-linked /upload-photo call below actually requires result.tripId.
   var stepPhotoIds=Object.keys(target.stepPhotosByStepId||{});
-  if(options.importPhotos&&result.tripId&&stepPhotoIds.length){
+  if(options.importPhotos&&(result.tripId||options.journalOnly)&&stepPhotoIds.length){
     var stepPlaceIds=(progress&&progress.stepPlaceIds)||{};
+    // stepEntryIds only exists when Journal import was on — the journey/entries wouldn't exist
+    // otherwise. Attaching here (in addition to the ctx.files.create() upload above) is what
+    // actually gets the photo into the Journey view's own gallery for that entry.
+    var stepEntryIds=(progress&&progress.stepEntryIds)||{};
     var totalStepPhotos=stepPhotoIds.reduce(function(n,id){return n+target.stepPhotosByStepId[id].length;},0);
     var spCount=0,spFailed=0,spSkipped=0;
     var spProgItem=document.createElement('div');spProgItem.className='prog-item';
@@ -3579,18 +3640,33 @@ async function importOneTarget(target,options,progList,isPdfTarget){
     progList.appendChild(spProgItem);rh();
     for(var sid of stepPhotoIds){
       var placeIdForStep=stepPlaceIds[sid];
+      var entryIdForStep=stepEntryIds[sid];
       var stepForName=((target.polarsteps&&target.polarsteps.steps)||[]).find(function(s){return s.id===sid;});
       for(var spf of target.stepPhotosByStepId[sid]){
-        if(!placeIdForStep){spSkipped++;continue;} // step's place wasn't created (no coords, or import didn't reach it) — nothing to attach to
+        if(!placeIdForStep&&!entryIdForStep){spSkipped++;continue;} // neither the step's place nor its journal entry was created — nothing to attach to
         try{
           var spBuf=await getFileBuffer(spf);
           var spCompressed=await compressUnderCap(spBuf,spf.name,PHOTO_UPLOAD_MAX_BASE64);
           if(!spCompressed){spFailed++;continue;}
-          var sppr=await invoke('/upload-photo','POST',{
-            tripId:result.tripId,
-            photo:{name:spf.name,base64:spCompressed.base64,mimetype:'image/jpeg',sizeBytes:spCompressed.sizeBytes,description:stepForName?('Polarsteps: '+stepForName.name):'Polarsteps photo',placeId:placeIdForStep}
-          });
-          if(sppr&&sppr.ok){spCount++;if(sppr.fileId)importRefs.push({type:'file',id:sppr.fileId});}else spFailed++;
+          if(placeIdForStep){
+            var sppr=await invoke('/upload-photo','POST',{
+              tripId:result.tripId,
+              photo:{name:spf.name,base64:spCompressed.base64,mimetype:'image/jpeg',sizeBytes:spCompressed.sizeBytes,description:stepForName?('Polarsteps: '+stepForName.name):'Polarsteps photo',placeId:placeIdForStep}
+            });
+            if(sppr&&sppr.ok){spCount++;if(sppr.fileId)importRefs.push({type:'file',id:sppr.fileId});}else spFailed++;
+          }
+          // Also (or instead, if there's no place) drop it straight into the journal entry's
+          // own photo gallery — this is what actually shows up in the Journey view; the
+          // ctx.files.create() upload above only ever lands on the trip's Files tab.
+          if(entryIdForStep){
+            try{
+              var eppr=await invoke('/attach-entry-photo','POST',{
+                entryId:entryIdForStep,
+                photo:{name:spf.name,base64:spCompressed.base64,sizeBytes:spCompressed.sizeBytes}
+              });
+              if(!placeIdForStep&&eppr&&eppr.ok)spCount++;
+            }catch(_e){}
+          }
           document.getElementById('sub-'+kp+'steppics').textContent=spCount+' / '+totalStepPhotos+' done';
           await new Promise(function(r){setTimeout(r,400);});
         }catch(_e){spFailed++;}
@@ -4030,7 +4106,60 @@ function showSt1(msg,type){
   el.style.display='block';el.className=type==='e'?'et':'st';el.textContent=msg;rh();
 }
 
-async function onCtx(){rh();}
+// trek:context.viewport (added in TREK 4.0.0) — { surface, formFactor, fill, insets }. This
+// plugin is type:"page" so surface is always 'plugin-page' (fill:true), but formFactor still
+// tells us phone vs desktop. Reflected as a data attribute so CSS can apply the "feels native
+// on a phone" rules the client-bridge skill calls out (>=16px inputs so iOS doesn't zoom on
+// focus, >=44px touch targets) — this plugin had none of that before. `insets` is space the
+// HOST already keeps clear around the frame (a floating mobile dock, etc.) — exposed as CSS
+// vars only for any future fixed/sticky chrome of our own to align against; the wizard has no
+// such element today, so nothing consumes them yet, and per the docs they must never be added
+// as extra padding (the host-reserved space already excludes them from our container).
+function onCtx(m){
+  var vp=m&&m.viewport;
+  var docEl=document.documentElement;
+  if(vp&&vp.formFactor)docEl.setAttribute('data-form-factor',vp.formFactor);
+  if(vp&&vp.insets){
+    docEl.style.setProperty('--trek-inset-top',(vp.insets.top||0)+'px');
+    docEl.style.setProperty('--trek-inset-bottom',(vp.insets.bottom||0)+'px');
+  }
+  restoreWizardPrefs();
+  rh();
+}
+function saveWizardPrefs(){
+  var g=function(id){var el=document.getElementById(id);return el?el.checked:undefined;};
+  var prefs={
+    journal:g('opt-journal'),places:g('opt-places'),bookings:g('opt-bookings'),
+    costs:g('opt-costs'),daynotes:g('opt-daynotes'),photos:g('opt-photos'),
+    journalOnly:g('opt-journal-only'),
+    currency:(document.getElementById('opt-currency')||{}).value
+  };
+  sessionSet('wizardPrefs',prefs);
+}
+// Restores the "what to import" toggles + default currency from the previous session (per
+// user+plugin, window.trek.session scope:'plugin' — see sessionGet/sessionSet above). Files/
+// parsed data can never survive a reload (dropped File objects aren't serializable and the
+// 1 KiB-per-key session quota couldn't hold a parsed trip anyway), so this is deliberately
+// scoped to small preferences, not a mid-import resume. Runs once; prepareStep3()'s own
+// per-trip currency auto-detect still overrides this when it actually found a currency in the
+// source data, exactly as it already overrides the hardcoded EUR default.
+var _wizardPrefsRestored=false;
+function restoreWizardPrefs(){
+  if(_wizardPrefsRestored)return;_wizardPrefsRestored=true;
+  sessionGet('wizardPrefs').then(function(prefs){
+    if(!prefs||typeof prefs!=='object')return;
+    var s=function(id,val){if(val===undefined)return;var el=document.getElementById(id);if(el)el.checked=!!val;};
+    s('opt-journal',prefs.journal);s('opt-places',prefs.places);s('opt-bookings',prefs.bookings);
+    s('opt-costs',prefs.costs);s('opt-daynotes',prefs.daynotes);s('opt-photos',prefs.photos);
+    s('opt-journal-only',prefs.journalOnly);
+    if(prefs.currency){
+      var sel=document.getElementById('opt-currency');
+      if(sel&&Array.prototype.some.call(sel.options,function(o){return o.value===prefs.currency;}))sel.value=prefs.currency;
+    }
+    var jo=document.getElementById('opt-journal-only');
+    if(jo&&jo.checked)toggleJournalOnly();
+  });
+}
 function escHtml(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function rh(){var h=Math.ceil(document.documentElement.scrollHeight);window.parent.postMessage({type:'trek:resize',height:h+20},'*');}
 window.parent.postMessage({type:'trek:ready'},'*');

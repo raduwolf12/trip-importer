@@ -788,7 +788,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.4.1 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.5.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1385,6 +1385,21 @@ module.exports = definePlugin({
             // to the right place — placeId only ever exists inside this request, so it has to be
             // handed back out through progress the same way createdRefs is.
             stepPlaceIds: {},
+            // Polarsteps step.id -> the journal entry created for it, same handoff reason as
+            // stepPlaceIds above — the client needs this to attach a step's own embedded photos
+            // directly into the entry's photo gallery via ctx.journal.addEntryPhoto, not just
+            // ctx.files.create() the Files tab (see /attach-entry-photo below).
+            stepEntryIds: {},
+            // placeId/reservationId -> a short source label ('Polarsteps'/'GPS photos'/
+            // 'Google Timeline'/a booking type), accumulated across resumed rounds and
+            // persisted once to ctx.meta at 'imported_place_sources'/'imported_reservation_sources'
+            // when the import finishes (same one-write-at-done pattern as last_import_errors —
+            // see below). One JSON blob per trip rather than a ctx.meta key per entity: the
+            // tableContributor hook below needs to answer for every place/reservation in a
+            // single ctx.meta.get, not one round trip per row, to stay inside its own short
+            // per-call timeout.
+            placeSources: {},
+            reservationSources: {},
           }, progressIn || {})
 
           // ── 0. Journal-only mode — a standalone journey, no trip at all ────
@@ -1456,7 +1471,10 @@ module.exports = definePlugin({
                   })
                   p.journalEntries++
                   const entryId = entryRes?.id ?? entryRes?.data?.id
-                  if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                  if (entryId) {
+                    p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                    if (step.id != null) p.stepEntryIds[step.id] = entryId
+                  }
                   await sleep(100)
                 } catch (e) { errors.push('Step ' + step.name + ': ' + e.message) }
               }
@@ -1750,6 +1768,7 @@ module.exports = definePlugin({
                         if (placeId) {
                           p.createdRefs.push({ type: 'place', id: placeId })
                           if (step.id != null) p.stepPlaceIds[step.id] = placeId
+                          p.placeSources[placeId] = 'Polarsteps'
                         }
                       } catch (_e) {}
                       await sleep(80)
@@ -1770,7 +1789,10 @@ module.exports = definePlugin({
                       const entryRes = await ctx.journal.createEntry(journeyId, entry)
                       p.journalEntries++
                       const entryId = entryRes?.id ?? entryRes?.data?.id
-                      if (entryId) p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                      if (entryId) {
+                        p.createdRefs.push({ type: 'journalEntry', id: entryId })
+                        if (step.id != null) p.stepEntryIds[step.id] = entryId
+                      }
 
                       // Also add to day notes if day exists for this date
                       if (options.importDayNotes && entryDate && dayMap[entryDate] && step.description) {
@@ -1891,7 +1913,7 @@ module.exports = definePlugin({
 
                   // Assign to day if date known
                   const placeId = place?.id ?? place?.data?.id
-                  if (placeId) p.createdRefs.push({ type: 'place', id: placeId })
+                  if (placeId) { p.createdRefs.push({ type: 'place', id: placeId }); p.placeSources[placeId] = 'GPS/Timeline' }
                   if (placeId && cluster.date && dayMap[cluster.date]) {
                     try { await ctx.itinerary.assign(tripId, dayMap[cluster.date], placeId) } catch (_e) {}
                   }
@@ -1941,7 +1963,7 @@ module.exports = definePlugin({
                     place = await ctx.places.create(tripId, { name: hotelName, address: b.to || b.from || undefined })
                   } catch (_e) {}
                   const placeId = place?.id ?? place?.data?.id
-                  if (placeId) p.createdRefs.push({ type: 'place', id: placeId })
+                  if (placeId) { p.createdRefs.push({ type: 'place', id: placeId }); p.placeSources[placeId] = 'Booking import' }
                   const startDayId = b.from_date && dayMap[b.from_date]
                   const endDayId = b.to_date && dayMap[b.to_date]
                   if (placeId && startDayId && endDayId) {
@@ -1986,7 +2008,7 @@ module.exports = definePlugin({
                   const resv = await ctx.reservations.create(tripId, input)
                   p.bookingsRes++
                   const resvId = resv?.id ?? resv?.data?.id
-                  if (resvId) p.createdRefs.push({ type: 'reservation', id: resvId })
+                  if (resvId) { p.createdRefs.push({ type: 'reservation', id: resvId }); p.reservationSources[resvId] = input.type }
                 }
               } catch (e) { errors.push('Booking ' + b.title + ': ' + e.message) }
             }
@@ -2044,6 +2066,22 @@ module.exports = definePlugin({
             (!options?.importPlaces || p.places >= totalClusters) &&
             (!bookingsActive || p.bookings >= totalBookingsCount) &&
             (!costsActive || p.costs >= totalExpensesCount)
+
+          // Persist the cumulative error list across resumed rounds (each round's own
+          // `errors` above is per-round only, per the resumable-import contract — the client
+          // is what normally accumulates them). Kept on `progress` itself so it survives a
+          // page reload via window.trek.session, and mirrored into ctx.meta once the import
+          // finishes so hooks.warningProvider can surface unresolved failures natively in the
+          // trip planner even after the wizard is closed — best-effort, never blocks the import.
+          p.errors = (p.errors || []).concat(errors).slice(-30)
+          if (p.done && tripId) {
+            await attempt(() => ctx.meta.set('trip', tripId, 'last_import_errors', p.errors))
+            // Mirrors placeSources/reservationSources (see p init above) into trip meta as one
+            // blob each, for hooks.tableContributor below to read back in a single call per
+            // table view instead of one ctx.meta round trip per row.
+            if (Object.keys(p.placeSources).length) await attempt(() => ctx.meta.set('trip', tripId, 'imported_place_sources', p.placeSources))
+            if (Object.keys(p.reservationSources).length) await attempt(() => ctx.meta.set('trip', tripId, 'imported_reservation_sources', p.reservationSources))
+          }
 
           return { ok: true, tripId, log, errors, progress: p }
         })
@@ -2104,6 +2142,33 @@ module.exports = definePlugin({
       },
     },
 
+    // ── Attach a photo directly into a journal entry's own gallery ────────────
+    // Separate from /upload-photo (which attaches to the trip's Files tab, optionally
+    // linked to a place via place_id) — ctx.journal.addEntryPhoto writes into the entry's
+    // photo gallery itself, which is what actually shows up in the Journey view. Confirmed
+    // against the real plugin-sdk/src/index.ts: addEntryPhoto(entryId, {name, content_base64,
+    // caption?}), gated on db:write:journal (already declared), images only, 10MB decoded cap.
+    // The client sends the same already-compressed base64 it uses for /upload-photo, so no
+    // separate size handling is needed here beyond the same sanity check.
+    {
+      method: 'POST', path: '/attach-entry-photo', auth: true,
+      async handler(req, ctx) {
+        const entryId = Number(req.body?.entryId)
+        const photo = req.body?.photo
+        if (!entryId || !photo?.base64 || !photo?.name) return safeJson(200, { error: 'entryId, photo.base64 and photo.name required' })
+        const result = await tryAttempt(async () => {
+          if (photo.sizeBytes > 10 * 1024 * 1024) return { error: 'File too large' }
+          const res = await ctx.journal.addEntryPhoto(entryId, {
+            name: photo.name,
+            content_base64: photo.base64,
+            caption: photo.caption || undefined,
+          })
+          return { ok: true, photoId: res?.id ?? res?.data?.id ?? null }
+        })
+        return safeJson(200, result)
+      },
+    },
+
     // ── Undo an import ─────────────────────────────────────────────────────────
     // /import (and the client's own PDF-attach/photo-upload loops) return a `type`+`id`
     // ref for everything they create. The client sends them back here, newest-first, to
@@ -2147,6 +2212,14 @@ module.exports = definePlugin({
               else if (r.type === 'collectionPlace') await ctx.collections.deletePlace(r.id)
               deleted++
             } catch (e) { errors.push((r.type || 'item') + ' ' + r.id + ': ' + e.message) }
+          }
+          // Fully undoing an import's refs should also clear the persisted warning from the
+          // last_import_errors meta (see /import) — otherwise a stale "N items failed" warning
+          // would keep showing in the trip planner for content that no longer exists.
+          if (tripId && i >= refs.length) {
+            await attempt(() => ctx.meta.delete('trip', tripId, 'last_import_errors'))
+            await attempt(() => ctx.meta.delete('trip', tripId, 'imported_place_sources'))
+            await attempt(() => ctx.meta.delete('trip', tripId, 'imported_reservation_sources'))
           }
           return { deleted, remaining: refs.slice(i), errors, done: i >= refs.length }
         })
@@ -2292,6 +2365,56 @@ module.exports = definePlugin({
   // per-user instead of instance-wide here. Left unset, search()/getById() both return
   // nothing for that user rather than emitting broken (relative) URLs TREK would just drop.
   hooks: {
+    // ── warningProvider hook (hook:trip-warning-provider) ──────────────────────
+    // Surfaces the errors[] accumulated across a resumable /import's rounds (persisted to
+    // ctx.meta at 'last_import_errors' when progress.done fires — see /import above) natively
+    // in the trip planner, so a failure the user missed in the wizard's own log (e.g. they
+    // closed the tab before scrolling to it) isn't silently lost. Cleared by /undo-import once
+    // every ref from that import batch is removed. Read-only and best-effort: a missing/
+    // unreadable meta value (ctx.meta ever undefined, or nothing imported yet) just means no
+    // warnings, never an error.
+    warningProvider: {
+      async getWarnings(tripId, ctx) {
+        const errs = await attempt(() => ctx.meta.get('trip', tripId, 'last_import_errors'), null)
+        if (!Array.isArray(errs) || !errs.length) return []
+        let message = 'Trip Importer: ' + errs.length + ' item' + (errs.length === 1 ? '' : 's') +
+          ' failed during the last import — ' + errs.slice(0, 3).join('; ')
+        if (message.length > 280) message = message.slice(0, 277) + '...'
+        return [{ level: 'warning', message }]
+      },
+    },
+    // ── tableContributor hook (hook:table-contributor) ─────────────────────────
+    // Confirmed against TREK's real plugin-sdk/src/index.ts (github.com/liketrek/TREK) —
+    // the trek-plugin-dev skill only summarizes this hook as "columns/actions on core table
+    // views", no call shape — so the interface below is read off the actual TypeScript, not
+    // guessed: getContributions(view, tripId, ctx) where view is one of
+    // 'reservations'|'places'|'day'|'costs'|'packing'|'files', returning TableColumnContribution
+    // ({kind:'column', entityId, id, label, value?, url?, icon?, tone?}) or
+    // TableActionContribution objects, capped by the host at 20 columns/10 actions PER ENTITY.
+    // Adds a single "Source" column to each place/reservation row this plugin created, reading
+    // back the imported_place_sources/imported_reservation_sources meta blobs written by
+    // /import (see the p.placeSources/p.reservationSources comment there) in one ctx.meta.get
+    // call each — not one call per row, which would risk this hook's own short timeout on a
+    // trip with many imported rows. ctx.trips.getPlaces/getReservations are only used to know
+    // which of the CURRENT rows still exist (an undo or manual delete removes rows out from
+    // under a stale source map without touching the map itself for anything short of a full
+    // batch undo — see /undo-import).
+    tableContributor: {
+      async getContributions(view, tripId, ctx) {
+        if (view !== 'places' && view !== 'reservations') return []
+        const isPlaces = view === 'places'
+        const sources = await attempt(() => ctx.meta.get('trip', tripId, isPlaces ? 'imported_place_sources' : 'imported_reservation_sources'), null)
+        if (!sources || typeof sources !== 'object' || !Object.keys(sources).length) return []
+        const rows = await attempt(() => isPlaces ? ctx.trips.getPlaces(tripId) : ctx.trips.getReservations(tripId), [])
+        const out = []
+        for (const row of (rows || []).slice(0, 300)) {
+          const label = sources[row.id]
+          if (!label) continue
+          out.push({ kind: 'column', entityId: row.id, id: 'trip-importer-source', label: 'Source', value: label, icon: 'PackageOpen', tone: 'default' })
+        }
+        return out
+      },
+    },
     photoProvider: {
       async search(query, opts, ctx) {
         const baseUrl = String((await attempt(() => ctx.settings.get('trek_base_url'))) || '').replace(/\/+$/, '')

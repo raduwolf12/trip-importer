@@ -88,6 +88,8 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 | `db:write:collections` | Create a Collection and save imported places into it |
 | `ai:invoke` | Optional AI fallback when pattern-matching finds no bookings in a text/email confirmation |
 | `hook:photo-provider` | Makes imported photos searchable through TREK's native photo picker (not yet consumed by any picker UI in the current TREK release — see Setup) |
+| `hook:trip-warning-provider` | Surfaces unresolved import failures as a native trip-planner warning, so they're visible even after you close the wizard |
+| `hook:table-contributor` | Adds a "Source" column to imported places and reservations in the trip planner's own tables |
 | `http:outbound:nominatim.openstreetmap.org` | Reverse geocoding for GPS places |
 | `http:outbound:polarsteps.s3.amazonaws.com` | Fetching the trip cover photo and step photos directly from Polarsteps' own CDN |
 | `http:outbound:www.google.com` | Resolving a pasted Google Maps list link and fetching its places (Collection mode) |
