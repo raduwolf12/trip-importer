@@ -3,5 +3,17 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
+  "scripts": {
+    "testdata": "node generate-test-data.js",
+    "testdata:list": "node generate-test-data.js --list",
+    "testdata:polarsteps": "node generate-test-data.js --scenario polarsteps",
+    "testdata:bookings": "node generate-test-data.js --scenario bookings",
+    "testdata:expenses": "node generate-test-data.js --scenario expenses",
+    "testdata:gpx-kml": "node generate-test-data.js --scenario gpx-kml",
+    "testdata:timeline": "node generate-test-data.js --scenario timeline",
+    "testdata:takeout": "node generate-test-data.js --scenario takeout",
+    "testdata:collection": "node generate-test-data.js --scenario collection",
+    "testdata:stress": "node generate-test-data.js --scenario stress"
+  },
   "devDependencies": { "trek-plugin-sdk": "^1.0.0" }
 }

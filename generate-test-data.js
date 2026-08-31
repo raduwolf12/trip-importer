@@ -2,35 +2,53 @@
 /**
  * generate-test-data.js
  * Generates sample data covering every import source the Trip Importer plugin understands
- * (Polarsteps ZIP/JSON, booking text/.eml/.ics, expense/place CSVs, GPX/KML/KMZ, Google Maps
+ * (Polarsteps ZIP/JSON, booking text/.eml/.ics, expense CSVs, GPX/KML/KMZ, Google Maps
  * Timeline, Google Photos Takeout sidecars, Google "Saved places" Collection-mode exports),
  * plus several edge cases and oversized variants that exercise the client-side pagination/
  * chunking added to stay under TREK's confirmed ~100KB plugin-route body limit.
  *
+ * Output is split into one subdirectory per SCENARIO, so you can generate just the data you
+ * need for the test you're actually running instead of always getting the full kitchen sink.
+ *
  * Usage:
- *   node generate-test-data.js [--steps N] [--out ./test-data]
+ *   node generate-test-data.js [--list]
+ *   node generate-test-data.js [--scenario NAME[,NAME...]] [--steps N] [--out ./test-data]
  *
- * Defaults: 300 steps for the main Polarsteps stress test, output to ./test-data/
+ * Examples:
+ *   node generate-test-data.js --list                       # show scenario names + what they cover
+ *   node generate-test-data.js                               # generate everything (default: all)
+ *   node generate-test-data.js --scenario polarsteps          # just the Polarsteps JSON/ZIP sources
+ *   node generate-test-data.js --scenario bookings,expenses    # a couple of specific scenarios
+ *   node generate-test-data.js --scenario stress --steps 800  # oversized/chunking stress data only
  *
- * Run `node generate-test-data.js` with no args, then drop the whole test-data/ folder
- * (or individual files/subfolders) onto the Trip Importer wizard. See the printed manifest
- * at the end of a run for what each file exercises.
+ * Defaults: scenario=all, 300 steps for the main Polarsteps stress test, output to ./test-data/
+ *
+ * Each scenario writes into its own subfolder under --out (e.g. test-data/polarsteps/,
+ * test-data/bookings/), so you can drop just that folder onto the Trip Importer wizard. See the
+ * printed manifest at the end of a run for what each file exercises.
  */
 
 'use strict'
 const fs = require('fs')
 const path = require('path')
 
+// ── Scenario registry ───────────────────────────────────────────────────────────
+// Each scenario is a named, independently-runnable generator writing into its own
+// subdirectory of --out. Registered at the bottom of the file, once all the generator
+// functions below are defined.
+const SCENARIOS = {} // name -> { desc, fn(dir) }
+function registerScenario(name, desc, fn) { SCENARIOS[name] = { desc, fn } }
+
 // ── CLI args ──────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2)
+const hasFlag = flag => args.indexOf(flag) >= 0
 const getArg = (flag, def) => {
   const i = args.indexOf(flag)
   return i >= 0 && args[i + 1] ? args[i + 1] : def
 }
 const STEPS = Number(getArg('--steps', 300))
 const OUT = getArg('--out', path.join(process.cwd(), 'test-data'))
-
-fs.mkdirSync(OUT, { recursive: true })
+const SCENARIO_ARG = getArg('--scenario', getArg('--only', 'all'))
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const rand = (min, max) => Math.random() * (max - min) + min
@@ -41,7 +59,7 @@ const uuid = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => 
   return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
 })
 const isoDate = ts => new Date(ts * 1000).toISOString().slice(0, 10)
-const manifest = [] // {file, note} — printed at the end
+let manifest = [] // {file, note} — printed at the end, reset per scenario run
 const note = (file, text) => manifest.push({ file, text })
 
 const CITIES = [
@@ -383,6 +401,36 @@ Bokningsnummer: SJXY123456
 `
 }
 
+// A booking with no currency symbol/code anywhere in the text — exercises the fallback chain
+// documented in CLAUDE.md: currency-less booking text falls back to the user-selected
+// defaultCurrency, and if that's somehow unset too, the server's own final fallback is a
+// hardcoded 'EUR'.
+function generateBookingNoCurrency() {
+  return `--- BOOKING: LOCAL TOUR ---
+Confirmation: TOUR-88213
+Operator: City Walking Tours
+Tour: Old Town Evening Walk
+Date: 16 September 2026 at 18:00
+Meeting point: Central Square, near the fountain
+Price: 45.00 per person
+Status: CONFIRMED
+`
+}
+
+// A bus/train route with no "Train NNNN" marker at all — exercises the looser single-row
+// fallback (unicode-aware routePat, 1-3 Title-Case words either side of a -/–/to/→ separator),
+// not the dedicated structured rail-ticket detector.
+function generateBookingLooseRoute() {
+  return `--- BOOKING: REGIONAL BUS ---
+Reference: RB-55210
+Service: Regional Coach
+Route: Prague Florenc – Cesky Krumlov
+Departure: 22 September 2026 09:15
+Price: EUR 12.50
+Status: CONFIRMED
+`
+}
+
 // .eml MIME message with a quoted-printable HTML body — extractEmlText() must decode the MIME
 // structure (headers + Content-Transfer-Encoding) rather than feed raw quoted-printable bytes
 // to the regex/AI booking pipeline.
@@ -483,6 +531,21 @@ function generateExpensesLocalized() {
   return rows.map(r => r.join(',')).join('\n')
 }
 
+// Edge cases beyond localization: a refund (negative amount), a row with no currency column
+// value at all (tests the `currency || options?.defaultCurrency || 'EUR'` fallback chain — see
+// CLAUDE.md), and a malformed row with a missing/empty amount (must be skipped, not crash the
+// parser or import as 0/NaN).
+function generateExpensesEdgeCases() {
+  const rows = [
+    ['Date', 'Name', 'Amount', 'Currency', 'Category'],
+    ['2026-09-18', 'Hotel refund (cancelled night)', '-45.00', 'USD', 'accommodation'],
+    ['2026-09-19', 'Street food stall (cash, no receipt currency noted)', '350', '', 'food'],
+    ['2026-09-20', 'Illegible receipt', '', 'EUR', 'other'],
+    ['2026-09-21', 'Tip jar', '5', 'USD', 'other'],
+  ]
+  return rows.map(r => r.join(',')).join('\n')
+}
+
 // ── GPX / KML ─────────────────────────────────────────────────────────────────
 function generateGpx(trackPointCount) {
   const start = new Date('2026-09-01T08:00:00Z').getTime()
@@ -516,7 +579,7 @@ function generateKml() {
   <Document>
     <Placemark>
       <name>Fushimi Inari Shrine</name>
-      <description>URL: https://maps.google.com/?cid=123<br>Notitie: Amazing at sunrise<br></description>
+      <description><![CDATA[URL: https://maps.google.com/?cid=123<br>Notitie: Amazing at sunrise<br>]]></description>
       <TimeStamp><when>2026-09-05</when></TimeStamp>
       <Point><coordinates>135.7727,34.9671,0</coordinates></Point>
     </Placemark>
@@ -532,31 +595,88 @@ function generateKml() {
     </Placemark>
     <Placemark>
       <name>Coastal hiking route</name>
+      <TimeStamp><when>2026-09-06</when></TimeStamp>
       <LineString><coordinates>135.10,34.20,0 135.11,34.21,0 135.12,34.22,0</coordinates></LineString>
+    </Placemark>
+    <Placemark>
+      <name>Old Town boundary</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>135.75,34.98,0 135.76,34.98,0 135.76,34.99,0 135.75,34.99,0 135.75,34.98,0</coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Placemark with no coordinates at all</name>
+      <description>Malformed entry — should be skipped gracefully, not crash the KML parser</description>
     </Placemark>
   </Document>
 </kml>
 `
 }
 
+// Degenerate GPX: a single waypoint and an empty track (no trkpts at all) — the parser must
+// handle a track with zero points without throwing, and a lone waypoint should still surface.
+function generateGpxEmpty() {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="trip-importer test data">
+  <wpt lat="48.2082" lon="16.3738"><name>Only Waypoint (Vienna)</name><time>2026-09-01T09:00:00Z</time></wpt>
+  <trk>
+    <name>Empty track</name>
+    <trkseg>
+    </trkseg>
+  </trk>
+</gpx>
+`
+}
+
 // ── Google Maps Timeline ──────────────────────────────────────────────────────
+// placeLocation is a plain `"geo:<lat>,<lng>"` URI string in a real export (confirmed against a
+// real 2025/2026 sample) — NOT the bare "lat, lng" pair this generator produced until the bug
+// that shape mismatch masked was found and fixed (see CLAUDE.md/CHANGELOG 1.6.0).
 function generateTimelineSemanticSegments() {
   const segs = []
   let t = new Date('2026-09-01T00:00:00Z').getTime()
   for (const city of CITIES.slice(0, 8)) {
     segs.push({
       startTime: new Date(t).toISOString(),
+      endTime: new Date(t + 3600000).toISOString(),
       visit: {
+        hierarchyLevel: '0',
         startTime: new Date(t).toISOString(),
         topCandidate: {
-          placeLocation: { latLng: `${city.lat}°, ${city.lon}°`.replace(/°/g, '') },
+          probability: '0.9',
           semanticType: 'Inferred visit',
+          placeLocation: `geo:${city.lat},${city.lon}`,
         },
       },
     })
     t += 2 * 24 * 3600 * 1000
   }
   return JSON.stringify({ semanticSegments: segs }, null, 2)
+}
+
+// A real 2025/2026 Android "Timeline.json" export ships as a BARE top-level array of segment
+// objects — no `{semanticSegments:[...]}` wrapper at all, and often not named
+// location-history.json/Records.json either. Exercises both the content-shape detection
+// (looksLikeGoogleTimelineJson()) and the bare-array branch of parseGoogleTimelineClient().
+function generateTimelineBareArray() {
+  const segs = []
+  let t = new Date('2026-09-01T00:00:00Z').getTime()
+  for (const city of CITIES.slice(0, 6)) {
+    segs.push({
+      startTime: new Date(t).toISOString(),
+      endTime: new Date(t + 3600000).toISOString(),
+      visit: {
+        hierarchyLevel: '0',
+        topCandidate: {
+          probability: '0.31',
+          semanticType: 'Unknown',
+          placeID: 'ChIJ' + Math.random().toString(36).slice(2, 12),
+          placeLocation: `geo:${city.lat},${city.lon}`,
+        },
+        probability: '0.9',
+      },
+    })
+    t += 2 * 24 * 3600 * 1000
+  }
+  return JSON.stringify(segs, null, 2)
 }
 
 function generateTimelineOldFormat() {
@@ -595,6 +715,16 @@ function generateTakeoutSidecar(name, lat, lng, ts) {
   return JSON.stringify({
     title: name,
     geoData: { latitude: lat, longitude: lng, altitude: 0 },
+    photoTakenTime: { timestamp: String(ts), formatted: new Date(ts * 1000).toISOString() },
+  }, null, 2)
+}
+// A "sidecar" with photoTakenTime but no geoData/geoDataExif at all (e.g. a photo taken indoors
+// with location services off) — the shape-check (photoTakenTime + geoData/geoDataExif with a
+// non-zero lat/lng) must reject this rather than importing a (0,0) point.
+function generateTakeoutSidecarNoGeo(name, ts) {
+  return JSON.stringify({
+    title: name,
+    geoData: { latitude: 0, longitude: 0, altitude: 0 },
     photoTakenTime: { timestamp: String(ts), formatted: new Date(ts * 1000).toISOString() },
   }, null, 2)
 }
@@ -662,51 +792,67 @@ function generatePlacesCsv(count) {
   return rows.map(r => r.map(c => /,/.test(String(c)) ? `"${c}"` : c).join(',')).join('\n')
 }
 
-// ── Write files ────────────────────────────────────────────────────────────────
-console.log(`\nGenerating test data in: ${OUT}\n`)
-
-function writeFile(rel, content) {
-  const outPath = path.join(OUT, rel)
+// ── File-writing helper — takes the scenario's own output dir ─────────────────
+function writeFile(dir, rel, content) {
+  const outPath = path.join(dir, rel)
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
   fs.writeFileSync(outPath, content)
   const bytes = Buffer.isBuffer(content) ? content.length : Buffer.byteLength(content)
   const kb = (bytes / 1024).toFixed(1)
-  console.log(`✓ ${rel.padEnd(34)} ${kb.padStart(8)} KB`)
+  console.log(`✓ ${path.relative(OUT, outPath).padEnd(40)} ${kb.padStart(8)} KB`)
   return outPath
 }
 
-console.log('── Polarsteps (bare JSON) ──')
-const polarstepsSizes = [
-  { file: 'trip.json', steps: STEPS, name: `Synthetic Long Trip (${STEPS} steps)`, opts: {},
-    text: `Main stress test — ${Math.ceil(STEPS / 40)} expected /parse-polarsteps + /import rounds at the 40-step chunk size` },
-  { file: 'trip_small.json', steps: 10, name: 'Synthetic Small Trip (10 steps)', opts: {},
-    text: 'Control — small enough to import in one round, no chunking' },
-  { file: 'trip_medium.json', steps: 50, name: 'Synthetic Medium Trip (50 steps)', opts: {},
-    text: 'Just over the 40-step chunk size — needs exactly 2 rounds' },
-  { file: 'trip_boundary.json', steps: 41, name: 'Synthetic Boundary Trip (41 steps)', opts: {},
-    text: 'Exactly one step over the chunk boundary' },
-  { file: 'trip_edge_cases.json', steps: 12, name: 'Synthetic Edge-Case Trip (12 steps)',
-    opts: { revisit: true, longStay: true, midnightCrossing: true, noLocation: true, noName: true, noWeather: true, coverPhoto: true },
-    text: 'Revisited location (same-day-set dedup), a 90-day step (tests 60-day itinerary cap), a timezone-midnight-crossing step (tests unixToDateInTz), null location/name/weather fields, and a cover photo URL' },
-  { file: 'trip_sentinel_date.json', steps: 8, name: 'Synthetic Sentinel-Date Trip (8 steps)',
-    opts: { sentinelEndDate: true },
-    text: 'Trip-level end_date is a bad-data sentinel (2099-01-01) — /import\'s day-range computation must fall back to the 400-day sanity cap rather than trying to create tens of thousands of day rows' },
-]
-for (const { file, steps, name, opts, text } of polarstepsSizes) {
-  const trip = generateTrip(steps, name, opts)
-  const json = JSON.stringify(trip)
-  writeFile(file, json)
-  note(file, `${steps} steps. ${text}`)
+// ── Scenario generators ─────────────────────────────────────────────────────────
+
+function genPolarstepsBasic(dir) {
+  console.log('── Polarsteps (bare JSON, sizes) ──')
+  const polarstepsSizes = [
+    { file: 'trip.json', steps: STEPS, name: `Synthetic Long Trip (${STEPS} steps)`, opts: {},
+      text: `Main stress test — ${Math.ceil(STEPS / 40)} expected /parse-polarsteps + /import rounds at the 40-step chunk size` },
+    { file: 'trip_small.json', steps: 10, name: 'Synthetic Small Trip (10 steps)', opts: {},
+      text: 'Control — small enough to import in one round, no chunking' },
+    { file: 'trip_medium.json', steps: 50, name: 'Synthetic Medium Trip (50 steps)', opts: {},
+      text: 'Just over the 40-step chunk size — needs exactly 2 rounds' },
+    { file: 'trip_boundary.json', steps: 41, name: 'Synthetic Boundary Trip (41 steps)', opts: {},
+      text: 'Exactly one step over the chunk boundary' },
+  ]
+  for (const { file, steps, name, opts, text } of polarstepsSizes) {
+    const trip = generateTrip(steps, name, opts)
+    const json = JSON.stringify(trip)
+    writeFile(dir, file, json)
+    note(file, `${steps} steps. ${text}`)
+  }
 }
 
-// Bare multi-trip file: some Polarsteps export paths bundle "all my trips" as one JSON array of
-// full trip objects rather than one file per trip — /parse-polarsteps must detect this shape.
-const multiTrips = [generateTrip(6, 'Multi-Trip Bundle: Japan Leg'), generateTrip(5, 'Multi-Trip Bundle: Korea Leg')]
-writeFile('trip_multi.json', JSON.stringify(multiTrips))
-note('trip_multi.json', 'A bare JSON ARRAY of 2 full trip objects — some Polarsteps exports bundle multiple trips in one file with no ZIP wrapper')
+function genPolarstepsEdgeCases(dir) {
+  console.log('── Polarsteps (bare JSON, edge cases) ──')
+  const cases = [
+    { file: 'trip_edge_cases.json', steps: 12, name: 'Synthetic Edge-Case Trip (12 steps)',
+      opts: { revisit: true, longStay: true, midnightCrossing: true, noLocation: true, noName: true, noWeather: true, coverPhoto: true },
+      text: 'Revisited location (same-day-set dedup), a 90-day step (tests 60-day itinerary cap), a timezone-midnight-crossing step (tests unixToDateInTz), null location/name/weather fields, and a cover photo URL' },
+    { file: 'trip_sentinel_date.json', steps: 8, name: 'Synthetic Sentinel-Date Trip (8 steps)',
+      opts: { sentinelEndDate: true },
+      text: 'Trip-level end_date is a bad-data sentinel (2099-01-01) — /import\'s day-range computation must fall back to the 400-day sanity cap rather than trying to create tens of thousands of day rows' },
+  ]
+  for (const { file, steps, name, opts, text } of cases) {
+    const trip = generateTrip(steps, name, opts)
+    writeFile(dir, file, JSON.stringify(trip))
+    note(file, `${steps} steps. ${text}`)
+  }
+}
 
-console.log('\n── Polarsteps ZIP export ──')
-{
+function genPolarstepsMulti(dir) {
+  console.log('── Polarsteps (bare multi-trip array) ──')
+  // Bare multi-trip file: some Polarsteps export paths bundle "all my trips" as one JSON array of
+  // full trip objects rather than one file per trip — /parse-polarsteps must detect this shape.
+  const multiTrips = [generateTrip(6, 'Multi-Trip Bundle: Japan Leg'), generateTrip(5, 'Multi-Trip Bundle: Korea Leg')]
+  writeFile(dir, 'trip_multi.json', JSON.stringify(multiTrips))
+  note('trip_multi.json', 'A bare JSON ARRAY of 2 full trip objects — some Polarsteps exports bundle multiple trips in one file with no ZIP wrapper')
+}
+
+function genPolarstepsZip(dir) {
+  console.log('── Polarsteps ZIP export ──')
   const zipTrip = generateTrip(5, 'Synthetic ZIP Export Trip (5 steps)')
   const zipTripJson = JSON.stringify(zipTrip)
   const nestedTrip = generateTrip(3, 'Nested ZIP Trip (3 steps)')
@@ -721,96 +867,247 @@ console.log('\n── Polarsteps ZIP export ──')
     // One level of nested ZIP (a ZIP inside the ZIP) — extractZipEntries() recurses up to depth 3.
     { name: 'nested/another-export.zip', data: makeZip([{ name: 'trip.json', data: Buffer.from(JSON.stringify(nestedTrip), 'utf8') }]) },
   ]
-  writeFile('polarsteps-export.zip', makeZip(entries))
+  writeFile(dir, 'polarsteps-export.zip', makeZip(entries))
   note('polarsteps-export.zip', 'Real ZIP: trip.json + a step-photo folder matching the "<slug>_<stepId>/photos/*" convention + a bundled Google Timeline JSON + one level of nested ZIP (recursive extraction)')
 }
 
-console.log('\n── Bookings (text / .eml / .ics) ──')
-writeFile('bookings.txt', generateBookings())
-note('bookings.txt', '5 mixed booking confirmations (flight/hotel/bus/flight/transfer) — regex extraction')
-writeFile('bookings_large.txt', generateBookingsLarge(80))
-note('bookings_large.txt', '80 flight confirmations concatenated in one file — exercises the client-side ~60KB booking-text chunk windowing added to /parse-bookings')
-writeFile('rail-tickets.txt', generateRailTickets())
-note('rail-tickets.txt', 'SJ/Resplus-style multi-leg rail e-ticket text — exercises the dedicated structured rail detector + duplicate-leg dedup')
-writeFile('booking.eml', generateEml())
-note('booking.eml', 'MIME email, quoted-printable HTML body — exercises extractEmlText() MIME decoding')
-writeFile('bookings.ics', generateIcs())
-note('bookings.ics', 'iCalendar export with a flight + hotel-stay VEVENT — exercises /parse-ics')
-
-console.log('\n── Expenses (CSV) ──')
-writeFile('expenses.csv', generateExpenses(30))
-note('expenses.csv', '30 rows, mixed JPY/THB/EUR/DKK/USD currencies and auto-detected categories')
-writeFile('expenses_localized.csv', generateExpensesLocalized())
-note('expenses_localized.csv', 'European decimal-comma formats ("1 978,00", "20,00") mixed with US/UK formats — exercises parseLocalizedNumber()')
-writeFile('expenses_large.csv', generateExpenses(3000, { startDate: '2026-01-01' }))
-note('expenses_large.csv', '3000 rows, comfortably over 60KB — exercises the client-side chunkCsvRows() windowing added to /parse-csv')
-
-console.log('\n── GPX / KML / KMZ ──')
-writeFile('track.gpx', generateGpx(40))
-note('track.gpx', '40 trackpoints + 2 named waypoints')
-writeFile('track_large.gpx', generateGpx(3000))
-note('track_large.gpx', '3000 trackpoints — exercises the client-side trkpt sampling (max 500) and clustering pipeline')
-writeFile('places.kml', generateKml())
-note('places.kml', 'Placemarks incl. an HTML <description> (URL/Notitie/<br> stripping), a revisited location on two different dates, and a LineString (route) placemark')
-{
-  const kmlBuf = Buffer.from(generateKml(), 'utf8')
-  writeFile('places.kmz', makeZip([{ name: 'doc.kml', data: kmlBuf }]))
-  note('places.kmz', 'Same placemarks as places.kml, zipped as a real KMZ')
+function genBookings(dir) {
+  console.log('── Bookings (text / .eml / .ics) ──')
+  writeFile(dir, 'bookings.txt', generateBookings())
+  note('bookings.txt', '5 mixed booking confirmations (flight/hotel/bus/flight/transfer) — regex extraction')
+  writeFile(dir, 'rail-tickets.txt', generateRailTickets())
+  note('rail-tickets.txt', 'SJ/Resplus-style multi-leg rail e-ticket text — exercises the dedicated structured rail detector + duplicate-leg dedup')
+  writeFile(dir, 'booking.eml', generateEml())
+  note('booking.eml', 'MIME email, quoted-printable HTML body — exercises extractEmlText() MIME decoding')
+  writeFile(dir, 'bookings.ics', generateIcs())
+  note('bookings.ics', 'iCalendar export with a flight + hotel-stay VEVENT — exercises /parse-ics')
+  writeFile(dir, 'booking_no_currency.txt', generateBookingNoCurrency())
+  note('booking_no_currency.txt', 'No currency symbol/code anywhere in the text — exercises the defaultCurrency/EUR fallback chain')
+  writeFile(dir, 'booking_loose_route.txt', generateBookingLooseRoute())
+  note('booking_loose_route.txt', 'Bus route with no "Train NNNN" marker — exercises the looser single-row routePat fallback rather than the structured rail detector')
 }
 
-console.log('\n── Google Maps Timeline ──')
-writeFile('location-history.json', generateTimelineSemanticSegments())
-note('location-history.json', 'New-format (2024+) semanticSegments/placeVisit shape')
-writeFile('Records.json', generateTimelineOldFormat())
-note('Records.json', 'Old-format timelineObjects/placeVisit shape')
-writeFile('timeline_raw_locations.json', generateTimelineRawLocations(6000))
-note('timeline_raw_locations.json', 'Raw `locations` array, 6000 points — likely several MB in a real export; exercises client-side JSON.parse + sample-to-200 + clustering entirely in-browser (never sent to the server whole)')
+function genExpenses(dir) {
+  console.log('── Expenses (CSV) ──')
+  writeFile(dir, 'expenses.csv', generateExpenses(30))
+  note('expenses.csv', '30 rows, mixed JPY/THB/EUR/DKK/USD currencies and auto-detected categories')
+  writeFile(dir, 'expenses_localized.csv', generateExpensesLocalized())
+  note('expenses_localized.csv', 'European decimal-comma formats ("1 978,00", "20,00") mixed with US/UK formats — exercises parseLocalizedNumber()')
+  writeFile(dir, 'expenses_edge_cases.csv', generateExpensesEdgeCases())
+  note('expenses_edge_cases.csv', 'A refund (negative amount), a row with an empty currency column, and a row with an empty amount — none of these should crash the parser or corrupt totals')
+}
 
-console.log('\n── Google Photos Takeout sidecars ──')
-{
+function genGpxKml(dir) {
+  console.log('── GPX / KML / KMZ ──')
+  writeFile(dir, 'track.gpx', generateGpx(40))
+  note('track.gpx', '40 trackpoints + 2 named waypoints')
+  writeFile(dir, 'track_empty.gpx', generateGpxEmpty())
+  note('track_empty.gpx', 'A lone waypoint plus a track with zero trkpts — parser must not throw on an empty <trkseg>')
+  writeFile(dir, 'places.kml', generateKml())
+  note('places.kml', 'Placemarks incl. an HTML <description> (URL/Notitie/<br> stripping), a revisited location on two different dates, a LineString route + a Polygon area (both exercise parseKMLTracks()/route_geometry, not just the single-point extraction), and a placemark with no coordinates at all (must be skipped, not crash)')
+  {
+    const kmlBuf = Buffer.from(generateKml(), 'utf8')
+    writeFile(dir, 'places.kmz', makeZip([{ name: 'doc.kml', data: kmlBuf }]))
+    note('places.kmz', 'Same placemarks as places.kml, zipped as a real KMZ')
+  }
+}
+
+function genTimeline(dir) {
+  console.log('── Google Maps Timeline ──')
+  writeFile(dir, 'location-history.json', generateTimelineSemanticSegments())
+  note('location-history.json', 'New-format (2024+) semanticSegments/placeVisit shape')
+  writeFile(dir, 'Records.json', generateTimelineOldFormat())
+  note('Records.json', 'Old-format timelineObjects/placeVisit shape')
+  writeFile(dir, 'Timeline.json', generateTimelineBareArray())
+  note('Timeline.json', 'Bare top-level array of segments (no semanticSegments wrapper), deliberately NOT named location-history.json/Records.json — exercises content-shape detection (looksLikeGoogleTimelineJson()) and the bare-array branch of parseGoogleTimelineClient()')
+}
+
+function genTakeout(dir) {
+  console.log('── Google Photos Takeout sidecars ──')
   const sidecars = [
     ['IMG_0001.jpg.json', 35.6895, 139.6917, Math.floor(new Date('2026-09-01T10:00:00Z').getTime() / 1000)],
     ['IMG_0002.jpg.json', 34.9671, 135.7727, Math.floor(new Date('2026-09-05T06:00:00Z').getTime() / 1000)],
     ['IMG_0003.jpg.json', 13.7563, 100.5018, Math.floor(new Date('2026-09-20T12:00:00Z').getTime() / 1000)],
   ]
   for (const [name, lat, lng, ts] of sidecars) {
-    writeFile(path.join('takeout-sidecars', name), generateTakeoutSidecar(name.replace(/\.json$/, ''), lat, lng, ts))
+    writeFile(dir, path.join('takeout-sidecars', name), generateTakeoutSidecar(name.replace(/\.json$/, ''), lat, lng, ts))
   }
   note('takeout-sidecars/*.jpg.json', 'Google Photos Takeout per-photo sidecars (photoTakenTime + geoData) — sidecar data wins over EXIF when a matching photo is also present; sidecars alone are enough to test detection/parsing')
+
+  const badTs = Math.floor(new Date('2026-09-10T08:00:00Z').getTime() / 1000)
+  writeFile(dir, path.join('takeout-sidecars', 'IMG_0004.jpg.json'), generateTakeoutSidecarNoGeo('IMG_0004', badTs))
+  note('takeout-sidecars/IMG_0004.jpg.json', 'photoTakenTime present but geoData is (0,0) — the shape-check must reject this as "no usable location", not import a null-island point')
 }
 
-console.log('\n── Collection mode: Google Saved Places / place-list CSV ──')
-writeFile('google-saved-places-lowercase.json', generateSavedPlacesLowercase())
-note('google-saved-places-lowercase.json', 'Takeout GeoJSON, lowercase properties.location.{name,address,geo_coordinates} variant')
-writeFile('google-saved-places-capitalized.json', generateSavedPlacesCapitalized())
-note('google-saved-places-capitalized.json', 'Takeout GeoJSON, capitalized properties.Location["Business Name"/"Address"/"Geo Coordinates"] variant')
-writeFile('google-saved-places-large.json', generateSavedPlacesLarge(1200))
-note('google-saved-places-large.json', '1200 features — exercises the client-side FeatureCollection chunking added to /parse-google-places')
-writeFile('places.csv', generatePlacesCsv(25))
-note('places.csv', 'Generic place-list CSV for Collection mode (name/lat/lng/address/notes/date fuzzy header matching)')
-writeFile('places_large.csv', generatePlacesCsv(2500))
-note('places_large.csv', '2500 rows — exercises the client-side chunkCsvRows() windowing added to /parse-places-csv')
+function genCollectionGeojson(dir) {
+  console.log('── Collection mode: Google Saved Places (GeoJSON) ──')
+  writeFile(dir, 'google-saved-places-lowercase.json', generateSavedPlacesLowercase())
+  note('google-saved-places-lowercase.json', 'Takeout GeoJSON, lowercase properties.location.{name,address,geo_coordinates} variant')
+  writeFile(dir, 'google-saved-places-capitalized.json', generateSavedPlacesCapitalized())
+  note('google-saved-places-capitalized.json', 'Takeout GeoJSON, capitalized properties.Location["Business Name"/"Address"/"Geo Coordinates"] variant')
+}
 
-console.log(`
-Manifest — what each file exercises:
+function genCollectionCsv(dir) {
+  console.log('── Collection mode: generic place-list CSV ──')
+  writeFile(dir, 'places.csv', generatePlacesCsv(25))
+  note('places.csv', 'Generic place-list CSV for Collection mode (name/lat/lng/address/notes/date fuzzy header matching)')
+}
+
+// Oversized/stress variants — everything sized to land well over TREK's confirmed ~100KB
+// plugin-route body limit if sent whole, to exercise the client-side pagination/chunking added
+// for each source. Kept as its own scenario so a normal functional-test run doesn't have to pay
+// for generating (and dropping) multi-MB files every time.
+function genStress(dir) {
+  console.log('── Oversized / chunking stress data ──')
+  writeFile(dir, 'bookings_large.txt', generateBookingsLarge(80))
+  note('bookings_large.txt', '80 flight confirmations concatenated in one file — exercises the client-side ~60KB booking-text chunk windowing added to /parse-bookings')
+  writeFile(dir, 'expenses_large.csv', generateExpenses(3000, { startDate: '2026-01-01' }))
+  note('expenses_large.csv', '3000 rows, comfortably over 60KB — exercises the client-side chunkCsvRows() windowing added to /parse-csv')
+  writeFile(dir, 'track_large.gpx', generateGpx(3000))
+  note('track_large.gpx', '3000 trackpoints — exercises the client-side trkpt sampling (max 500) and clustering pipeline')
+  writeFile(dir, 'timeline_raw_locations.json', generateTimelineRawLocations(6000))
+  note('timeline_raw_locations.json', 'Raw `locations` array, 6000 points — likely several MB in a real export; exercises client-side JSON.parse + sample-to-200 + clustering entirely in-browser (never sent to the server whole)')
+  writeFile(dir, 'google-saved-places-large.json', generateSavedPlacesLarge(1200))
+  note('google-saved-places-large.json', '1200 features — exercises the client-side FeatureCollection chunking added to /parse-google-places')
+  writeFile(dir, 'places_large.csv', generatePlacesCsv(2500))
+  note('places_large.csv', '2500 rows — exercises the client-side chunkCsvRows() windowing added to /parse-places-csv')
+}
+
+// ── Register scenarios (leaf scenarios — each writes its own subfolder) ───────────
+registerScenario('polarsteps-basic', 'Polarsteps bare-JSON trips at various sizes (chunking boundaries)', genPolarstepsBasic)
+registerScenario('polarsteps-edge-cases', 'Polarsteps trips targeting tricky code paths (revisits, long stays, tz-midnight, sentinel dates)', genPolarstepsEdgeCases)
+registerScenario('polarsteps-multi', 'A bare JSON array bundling multiple full Polarsteps trips in one file', genPolarstepsMulti)
+registerScenario('polarsteps-zip', 'A real Polarsteps ZIP export (step photos, bundled Timeline JSON, nested ZIP)', genPolarstepsZip)
+registerScenario('bookings', 'Booking sources: plain text, rail e-ticket text, .eml, .ics, no-currency + loose-route edge cases', genBookings)
+registerScenario('expenses', 'Expense CSVs: normal, localized decimal-comma amounts, and edge cases (refund/missing currency/blank amount)', genExpenses)
+registerScenario('gpx-kml', 'GPX track + KML/KMZ placemarks, incl. an empty track and a coordinate-less placemark', genGpxKml)
+registerScenario('timeline', 'Google Maps Timeline JSON (new + old schema)', genTimeline)
+registerScenario('takeout', 'Google Photos Takeout per-photo sidecar JSON files, incl. a no-geodata sidecar', genTakeout)
+registerScenario('collection-geojson', 'Collection-mode: Google Saved Places GeoJSON (both known property-naming variants)', genCollectionGeojson)
+registerScenario('collection-csv', 'Collection-mode: generic place-list CSV', genCollectionCsv)
+registerScenario('stress', 'Oversized variants of every chunked/paginated source (100KB+ body-limit stress test)', genStress)
+
+// ── Groups — convenience aliases that expand to several leaf scenarios ────────────
+// Requesting a group is exactly equivalent to requesting all of its members (deduped if mixed
+// with other requests). 'all' below is itself just the group of every leaf scenario.
+const GROUPS = {
+  polarsteps: ['polarsteps-basic', 'polarsteps-edge-cases', 'polarsteps-multi', 'polarsteps-zip'],
+  collection: ['collection-geojson', 'collection-csv'],
+}
+const LEAF_NAMES = Object.keys(SCENARIOS)
+GROUPS.all = LEAF_NAMES
+
+function expandNames(names) {
+  const out = []
+  for (const n of names) {
+    if (GROUPS[n]) { for (const m of GROUPS[n]) if (!out.includes(m)) out.push(m) }
+    else if (!out.includes(n)) out.push(n)
+  }
+  return out
+}
+
+// ── CLI: --list ──────────────────────────────────────────────────────────────────
+if (hasFlag('--list') || hasFlag('-l')) {
+  console.log('\nGroups (expand to several scenarios — pass to --scenario just like a leaf name):\n')
+  console.log(`  ${'all'.padEnd(20)} every scenario below`)
+  console.log(`  ${'polarsteps'.padEnd(20)} ${GROUPS.polarsteps.join(', ')}`)
+  console.log(`  ${'collection'.padEnd(20)} ${GROUPS.collection.join(', ')}`)
+  console.log('\nScenarios (pass one or more to --scenario, comma-separated):\n')
+  for (const [name, { desc }] of Object.entries(SCENARIOS)) {
+    console.log(`  ${name.padEnd(20)} ${desc}`)
+  }
+  console.log(`
+Examples:
+  node generate-test-data.js --scenario polarsteps-basic
+  node generate-test-data.js --scenario bookings,expenses
+  node generate-test-data.js --scenario stress --steps 800
+  node generate-test-data.js --scenario polarsteps      # the whole polarsteps-* group
+  node generate-test-data.js                            # interactive picker (or "all" if not a TTY)
 `)
-for (const { file, text } of manifest) console.log(`  ${file}\n    ${text}\n`)
+  process.exit(0)
+}
 
-console.log(`How to use:
-  1. Open Trip Importer in TREK (Trip mode) and drop the Polarsteps files, bookings/.eml/.ics,
-     expense CSVs, GPX/KML/KMZ, and Google Timeline JSON together (or in separate runs).
-  2. Switch to "Import into a Collection" mode and drop the google-saved-places-*.json / places*.csv
-     files separately — those are Collection-mode-only sources.
-  3. trip.json (${STEPS} steps) is the main chunking stress test; trip_boundary.json (41 steps) tests
-     the exact chunk-size boundary; trip_small.json (10 steps) is the control (no chunking needed).
-  4. trip_edge_cases.json and trip_sentinel_date.json specifically target known-tricky code paths
-     (see the manifest above) rather than raw size.
-  5. The *_large.* files (bookings_large.txt, expenses_large.csv, track_large.gpx,
-     timeline_raw_locations.json, google-saved-places-large.json, places_large.csv) are sized to
-     land well over TREK's confirmed ~100KB plugin-route body limit if sent whole — they should
-     import successfully now that each source is windowed/clustered client-side; if any of them
-     ever 413s again, that's a regression in that source's chunking.
+// ── Resolve which scenarios to run ────────────────────────────────────────────────
+async function promptScenarios() {
+  const readline = require('readline')
+  const names = LEAF_NAMES
+  console.log('\nSelect scenarios to generate:\n')
+  console.log(`   0. all                 every scenario below`)
+  console.log(`   p. polarsteps          ${GROUPS.polarsteps.join(', ')}`)
+  console.log(`   c. collection          ${GROUPS.collection.join(', ')}`)
+  names.forEach((n, i) => console.log(`  ${String(i + 1).padStart(2)}. ${n.padEnd(20)} ${SCENARIOS[n].desc}`))
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+  const answer = await new Promise(resolve => rl.question('\nEnter numbers/letters, comma-separated (blank = all): ', a => { rl.close(); resolve(a) }))
+  const tokens = answer.trim().toLowerCase().split(',').map(s => s.trim()).filter(Boolean)
+  if (!tokens.length) return LEAF_NAMES
+  const picked = []
+  for (const tok of tokens) {
+    if (tok === '0' || tok === 'all') { for (const n of LEAF_NAMES) if (!picked.includes(n)) picked.push(n); continue }
+    if (tok === 'p' || tok === 'polarsteps') { for (const n of GROUPS.polarsteps) if (!picked.includes(n)) picked.push(n); continue }
+    if (tok === 'c' || tok === 'collection') { for (const n of GROUPS.collection) if (!picked.includes(n)) picked.push(n); continue }
+    const idx = Number(tok)
+    if (Number.isInteger(idx) && idx >= 1 && idx <= names.length) { if (!picked.includes(names[idx - 1])) picked.push(names[idx - 1]); continue }
+    if (SCENARIOS[tok]) { if (!picked.includes(tok)) picked.push(tok); continue }
+    console.error(`  (ignoring unrecognized selection: "${tok}")`)
+  }
+  return picked.length ? picked : LEAF_NAMES
+}
+
+async function main() {
+  const scenarioWasPassed = hasFlag('--scenario') || hasFlag('--only')
+  let requested
+  if (!scenarioWasPassed && process.stdin.isTTY && process.stdout.isTTY) {
+    requested = await promptScenarios()
+  } else {
+    requested = expandNames(SCENARIO_ARG.split(',').map(s => s.trim()).filter(Boolean))
+  }
+
+  const unknown = requested.filter(s => !SCENARIOS[s])
+  if (unknown.length) {
+    console.error(`\nUnknown scenario(s): ${unknown.join(', ')}`)
+    console.error(`Run with --list to see available scenarios and groups.\n`)
+    process.exit(1)
+  }
+
+  fs.mkdirSync(OUT, { recursive: true })
+  console.log(`\nGenerating test data in: ${OUT}`)
+  console.log(`Scenarios: ${requested.join(', ')}\n`)
+
+  const allManifests = [] // {scenario, entries}
+  for (const name of requested) {
+    manifest = []
+    const dir = path.join(OUT, name)
+    fs.mkdirSync(dir, { recursive: true })
+    SCENARIOS[name].fn(dir)
+    allManifests.push({ scenario: name, entries: manifest })
+    console.log('')
+  }
+
+  console.log('Manifest — what each file exercises:\n')
+  for (const { scenario, entries } of allManifests) {
+    console.log(`[${scenario}/]`)
+    for (const { file, text } of entries) console.log(`  ${file}\n    ${text}\n`)
+  }
+
+  console.log(`How to use:
+  1. Each scenario landed in its own subfolder under ${path.relative(process.cwd(), OUT) || '.'}/ —
+     drop just the subfolder(s) you need onto the Trip Importer wizard (Trip mode for every
+     scenario except collection-geojson/collection-csv, which are Collection-mode-only sources).
+  2. Re-run with --list to see all scenario names, groups, and descriptions, run with no flags
+     for an interactive picker, or pass --scenario NAME[,NAME] / a group name (e.g. --scenario
+     polarsteps,stress) to regenerate just a subset non-interactively.
+  3. In the polarsteps-basic/ folder: trip.json (${STEPS} steps) is the main chunking stress test;
+     trip_boundary.json (41 steps) tests the exact chunk-size boundary; trip_small.json (10 steps)
+     is the control (no chunking needed). polarsteps-edge-cases/ targets known-tricky code paths
+     (revisits, long stays, timezone-midnight crossings, sentinel dates) rather than raw size.
+  4. The stress/ scenario's files are sized to land well over TREK's confirmed ~100KB plugin-route
+     body limit if sent whole — they should import successfully now that each source is
+     windowed/clustered client-side; if any of them ever 413s again, that's a regression in that
+     source's chunking.
 
 Chunk size: 40 Polarsteps steps / ~60KB per request for text-ish sources.
 Expected rounds for ${STEPS}-step trip.json: ${Math.ceil(STEPS / 40)} rounds.
 `)
+}
+
+main().catch(err => { console.error(err); process.exit(1) })
