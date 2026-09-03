@@ -788,7 +788,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.5.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1348,6 +1348,14 @@ module.exports = definePlugin({
           // starting at 0" via the ?? / || fallbacks where each is consumed below.
           bookingsOffset, totalBookings, expensesOffset, totalExpenses,
           places: placesIn, placesOffset, totalPlaces,
+          // GPX track LINE geometry (route_geometry on a dedicated place) — see options.gpxDrawGeometry.
+          // Capped client-side to ≤4 tracks / ≤300 points each (parseGPXTracks()), so unlike
+          // bookings/expenses/places this never needs its own per-round pagination.
+          gpxTracks,
+          // KML/KMZ LineString/Polygon geometry (route_geometry) — see options.kmlDrawGeometry.
+          // Same shape and same ≤4/≤300 caps as gpxTracks (parseKMLTracks()); handled by its own
+          // "3c. KML track geometry" section right after the GPX one.
+          kmlTracks,
         } = req.body || {}
         const result = await tryAttempt(async () => {
           const log = []; const errors = []
@@ -1373,6 +1381,8 @@ module.exports = definePlugin({
           const p = Object.assign({
             journeyId: null, journal: 0, journalEntries: 0, journalDayNotes: 0,
             places: 0, placesCreated: 0,
+            gpxTracks: 0, gpxTracksCreated: 0,
+            kmlTracks: 0, kmlTracksCreated: 0,
             bookings: 0, bookingsRes: 0, bookingsAcc: 0, bookingsReview: 0,
             costs: 0, costsCreated: 0,
             // {type, id} refs for everything created this import, newest-last — the source
@@ -1624,6 +1634,8 @@ module.exports = definePlugin({
               if (isoDateRe.test(b.to_date)) allDates.push(b.to_date)
             }
             for (const e of (expenses || [])) if (isoDateRe.test(e.date)) allDates.push(e.date)
+            for (const t of (gpxTracks || [])) if (isoDateRe.test(t.date)) allDates.push(t.date)
+            for (const t of (kmlTracks || [])) if (isoDateRe.test(t.date)) allDates.push(t.date)
             allDates.sort()
             if (allDates.length) {
               if (!rangeStart || allDates[0] < rangeStart) rangeStart = allDates[0]
@@ -1927,6 +1939,78 @@ module.exports = definePlugin({
             if (p.placesCreated || p.places < totalClusters) log.push({ type: 'places', message: msg })
           }
 
+          // ── 3b. GPX track geometry — a dedicated place per track, carrying route_geometry ──
+          // Available since TREK 4.0.0: route_geometry is part of the place CREATE request and is
+          // persisted/rendered on the map by core itself — no map-layer hook needed, unlike the
+          // approach this was originally built against. One place per track (not per cluster —
+          // a track's line doesn't correspond to any single GPS cluster), positioned at the
+          // track's own start point, named after the track, carrying the full (already
+          // client-capped-to-≤300-points) polyline. Independent of options.importPlaces — a user
+          // who wants only the route line without place pins from photos/timeline still gets it.
+          // CONFIRMED shape (shared/src/place/place.schema.ts + server/src/nest/places/places.service.ts
+          // importGpx, liketrek/TREK, read via `gh api` on 2026-09-01): `route_geometry` is a
+          // zod `z.string()` column — a JSON.stringify()'d array of [lat,lng] (or [lat,lng,ele])
+          // pairs, e.g. `JSON.stringify([[lat,lng],[lat,lng],...])`. NOT GeoJSON — GeoJSON's
+          // [lng,lat] order and this plugin's usual coordinate convention (from KML/GeoJSON
+          // parsing elsewhere in this file) would both be silently wrong here. TREK's own GPX
+          // <trk> importer (`importGpxFile`) builds it exactly this way from trkpt lat/lng, which
+          // is what parseGPXTracks()'s [lat,lng] point shape already matches with no reordering.
+          if (options?.gpxDrawGeometry && Array.isArray(gpxTracks) && gpxTracks.length && p.gpxTracks < gpxTracks.length) {
+            let i = p.gpxTracks
+            for (; i < gpxTracks.length; i++) {
+              if (!withinBudget()) break
+              const track = gpxTracks[i]
+              if (!track?.points?.length) continue
+              const [startLat, startLng] = track.points[0]
+              const routeGeometry = JSON.stringify(track.points)
+              let place
+              try {
+                place = await ctx.places.create(tripId, { name: track.name || 'GPX Track', lat: startLat, lng: startLng, route_geometry: routeGeometry })
+              } catch (_e) {
+                try { place = await ctx.places.create(tripId, { name: track.name || 'GPX Track', lat: startLat, lng: startLng }) } catch (e2) { errors.push('GPX track: ' + e2.message); continue }
+              }
+              p.gpxTracksCreated++
+              const placeId = place?.id ?? place?.data?.id
+              if (placeId) { p.createdRefs.push({ type: 'place', id: placeId }); p.placeSources[placeId] = 'GPX' }
+              if (placeId && track.date && dayMap[track.date]) {
+                try { await ctx.itinerary.assign(tripId, dayMap[track.date], placeId) } catch (_e) {}
+              }
+              await sleep(80)
+            }
+            p.gpxTracks = i
+            if (p.gpxTracksCreated) log.push({ type: 'places', message: 'Added ' + p.gpxTracksCreated + ' GPX track line' + (p.gpxTracksCreated === 1 ? '' : 's') + ' to the map' })
+          }
+
+          // ── 3c. KML/KMZ route geometry — same mechanism as 3b, for LineString/Polygon
+          // placemarks instead of GPX <trk>s. Byte-for-byte the same route_geometry handling
+          // (JSON.stringify()'d [lat,lng] pairs); the only difference is the source parser
+          // (parseKMLTracks() vs parseGPXTracks()) and the default place name.
+          if (options?.kmlDrawGeometry && Array.isArray(kmlTracks) && kmlTracks.length && p.kmlTracks < kmlTracks.length) {
+            let i = p.kmlTracks
+            for (; i < kmlTracks.length; i++) {
+              if (!withinBudget()) break
+              const track = kmlTracks[i]
+              if (!track?.points?.length) continue
+              const [startLat, startLng] = track.points[0]
+              const routeGeometry = JSON.stringify(track.points)
+              let place
+              try {
+                place = await ctx.places.create(tripId, { name: track.name || 'KML Route', lat: startLat, lng: startLng, route_geometry: routeGeometry })
+              } catch (_e) {
+                try { place = await ctx.places.create(tripId, { name: track.name || 'KML Route', lat: startLat, lng: startLng }) } catch (e2) { errors.push('KML route: ' + e2.message); continue }
+              }
+              p.kmlTracksCreated++
+              const placeId = place?.id ?? place?.data?.id
+              if (placeId) { p.createdRefs.push({ type: 'place', id: placeId }); p.placeSources[placeId] = 'KML' }
+              if (placeId && track.date && dayMap[track.date]) {
+                try { await ctx.itinerary.assign(tripId, dayMap[track.date], placeId) } catch (_e) {}
+              }
+              await sleep(80)
+            }
+            p.kmlTracks = i
+            if (p.kmlTracksCreated) log.push({ type: 'places', message: 'Added ' + p.kmlTracksCreated + ' KML route' + (p.kmlTracksCreated === 1 ? '' : 's') + ' to the map' })
+          }
+
           // ── 4. Upload photos (one at a time, compressed client-side) ──────
           // Photos are uploaded via /upload-photo route — import just tracks placeIds
           // (handled post-import by client in separate calls)
@@ -2064,6 +2148,8 @@ module.exports = definePlugin({
           p.done = p.days >= dateRange.length &&
             (!(journalActive || stepPlacesActive) || p.journal >= totalSteps) &&
             (!options?.importPlaces || p.places >= totalClusters) &&
+            (!options?.gpxDrawGeometry || !Array.isArray(gpxTracks) || p.gpxTracks >= gpxTracks.length) &&
+            (!options?.kmlDrawGeometry || !Array.isArray(kmlTracks) || p.kmlTracks >= kmlTracks.length) &&
             (!bookingsActive || p.bookings >= totalBookingsCount) &&
             (!costsActive || p.costs >= totalExpensesCount)
 
