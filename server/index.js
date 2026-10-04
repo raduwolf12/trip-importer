@@ -24,6 +24,20 @@ async function tryAttempt(fn) {
 async function attempt(fn, fallback) {
   try { return await fn() } catch (_e) { return fallback }
 }
+// Every user-facing URL/key setting this plugin has (trek_base_url, immich_base_url,
+// immich_api_key) is scope:'user' by design — see the comments at each call site for why. But a
+// single-tenant/family instance where every user actually shares the same TREK URL or the same
+// Immich server was left with no way to avoid re-typing the same value into every account's own
+// Settings page. This adds an admin-set instance-scoped fallback for each: a personal
+// scope:'user' value, when present, always wins (nothing here overrides a user's own choice);
+// only when it's unset does this fall back to the matching scope:'instance' default, read via
+// ctx.config (frozen at activation, per manifest.md) rather than ctx.settings.get (which only
+// ever surfaces the acting user's own scope:'user' values).
+async function settingWithInstanceFallback(ctx, userKey, instanceKey) {
+  const userVal = await attempt(() => ctx.settings.get(userKey))
+  if (userVal) return userVal
+  return (ctx.config && ctx.config[instanceKey]) || ''
+}
 // A trip_files row's created_at format isn't pinned down by the plugin-sdk's loosely-typed
 // TripFile (`[k: string]: unknown`) — could be an epoch-ms number or a SQL-style timestamp
 // string depending on the column. takenAt is purely decorative on a Photo, so never surface
@@ -177,9 +191,11 @@ async function reverseGeocode(lat, lng) {
 // be a fixed literal in trek-plugin.json's egress[] (unlike nominatim/polarsteps), this plugin
 // declares operatorEgress:true instead — the instance admin must add each user's Immich host under
 // Admin → Plugins before requests to it will succeed; see trek-plugin.json's immich_base_url hint.
+// A host on a private network (LAN, Tailscale) additionally needs TREK_PLUGIN_ALLOW_PRIVATE_EGRESS=on
+// set on the TREK server itself (TREK wiki, Plugins → Allowed hosts).
 async function readImmichSettingsOnce(ctx) {
-  const baseUrl = String((await attempt(() => ctx.settings.get('immich_base_url'))) || '').replace(/\/+$/, '')
-  const apiKey = String((await attempt(() => ctx.settings.get('immich_api_key'))) || '')
+  const baseUrl = String(await settingWithInstanceFallback(ctx, 'immich_base_url', 'immich_base_url_default')).replace(/\/+$/, '')
+  const apiKey = String(await settingWithInstanceFallback(ctx, 'immich_api_key', 'immich_api_key_default'))
   return { baseUrl, apiKey }
 }
 // A burst of concurrent picker requests (switching albums fast, thumbnails loading as the grid
@@ -788,7 +804,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.6.0 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -2503,7 +2519,7 @@ module.exports = definePlugin({
     },
     photoProvider: {
       async search(query, opts, ctx) {
-        const baseUrl = String((await attempt(() => ctx.settings.get('trek_base_url'))) || '').replace(/\/+$/, '')
+        const baseUrl = String(await settingWithInstanceFallback(ctx, 'trek_base_url', 'trek_base_url_default')).replace(/\/+$/, '')
         if (!baseUrl) return { photos: [], total: 0, hasMore: false }
         const q = String(query || '').trim().toLowerCase()
         const page = Math.max(1, Number(opts?.page) || 1)
@@ -2534,7 +2550,7 @@ module.exports = definePlugin({
         return { photos: all.slice(start, start + limit), total: all.length, hasMore: start + limit < all.length }
       },
       async getById(id, ctx) {
-        const baseUrl = String((await attempt(() => ctx.settings.get('trek_base_url'))) || '').replace(/\/+$/, '')
+        const baseUrl = String(await settingWithInstanceFallback(ctx, 'trek_base_url', 'trek_base_url_default')).replace(/\/+$/, '')
         if (!baseUrl) return null
         const [tripIdStr, fileIdStr] = String(id).split(':')
         const tripId = Number(tripIdStr); const fileId = Number(fileIdStr)
