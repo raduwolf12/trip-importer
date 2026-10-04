@@ -2,6 +2,14 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
+## [1.7.0] - 2026-09-13
+
+### Added
+- **Instance-scoped fallback settings** for the three previously user-only settings (`trek_base_url`, `immich_base_url`, `immich_api_key`): `trek_base_url_default`, `immich_base_url_default`, `immich_api_key_default`, all `scope:'instance'`, set once by the admin under Admin → Plugins → Instance settings. A user's own `scope:'user'` value, when set, always takes priority — the instance default is only used when a given user hasn't configured their own. Read via a shared `settingWithInstanceFallback(ctx, userKey, instanceKey)` helper (`server/index.js`), which checks `ctx.settings.get(userKey)` first and falls back to `ctx.config[instanceKey]` (the resolved instance-scoped value). Useful for single-tenant/family instances where every user shares the same TREK URL or the same Immich server, so nobody has to re-enter the same value into their own Settings page.
+
+### Docs
+- Documented that an Immich server on a private network (LAN address, `*.local`, Tailscale) needs `TREK_PLUGIN_ALLOW_PRIVATE_EGRESS=on` set on the TREK server, in addition to the admin allowing the hostname under Admin → Plugins — otherwise TREK blocks the request and the Immich picker can't connect. Added to the README's Known limitations and to the `immich_base_url` setting hint in `trek-plugin.json` (see issue #10).
+
 ## [1.6.0] - 2026-09-01
 
 ### Added

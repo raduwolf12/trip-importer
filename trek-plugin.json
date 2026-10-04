@@ -1,10 +1,10 @@
 {
   "id": "trip-importer",
   "name": "Trip Importer",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "apiVersion": 1,
   "type": "page",
-  "trek": ">=4.1.1 <5.0.0",
+  "trek": ">=4.2.0 <5.0.0",
   "author": "raduwolf12",
   "description": "Reconstruct past trips from Polarsteps, GPS photos, booking PDFs/ICS, expense CSVs and Google Timeline \u2014 auto-creates the trip, journal, places, bookings and costs, with multi-trip detection and undo.",
   "icon": "PackageOpen",
@@ -68,7 +68,7 @@
       "scope": "user",
       "required": false,
       "placeholder": "https://immich.example.com",
-      "hint": "Your self-hosted Immich server address. Your TREK admin must also allow outbound access to this host under Admin \u2192 Plugins (this plugin declares operator-managed egress since everyone's Immich server is different) \u2014 ask them to add it if the Immich picker can't connect. Leave blank to disable importing photos from Immich."
+      "hint": "Your self-hosted Immich server address. Your TREK admin must also allow outbound access to this host under Admin \u2192 Plugins (this plugin declares operator-managed egress since everyone's Immich server is different) \u2014 ask them to add it if the Immich picker can't connect. If the server is on a local network or Tailscale, TREK must also be started with TREK_PLUGIN_ALLOW_PRIVATE_EGRESS=on. Leave blank to disable importing photos from Immich."
     },
     {
       "key": "immich_api_key",
@@ -78,6 +78,33 @@
       "required": false,
       "secret": true,
       "hint": "Create one in Immich under Account Settings \u2192 API Keys. Stored encrypted and only ever read by this plugin's server-side code \u2014 never sent to your browser."
+    },
+    {
+      "key": "trek_base_url_default",
+      "label": "TREK public base URL (instance default)",
+      "input_type": "text",
+      "scope": "instance",
+      "required": false,
+      "placeholder": "https://trek.example.com",
+      "hint": "Optional org-wide fallback for the \"TREK public base URL\" setting above. Used only for users who haven't set their own value under Settings \u2192 Plugins. Useful when every user on this instance accesses TREK at the same URL."
+    },
+    {
+      "key": "immich_base_url_default",
+      "label": "Immich server URL (instance default)",
+      "input_type": "text",
+      "scope": "instance",
+      "required": false,
+      "placeholder": "https://immich.example.com",
+      "hint": "Optional org-wide fallback for \"Immich server URL\" above, for instances where everyone shares one Immich server. A user's own value, if set, always takes priority. The admin must still allow outbound access to this host under Admin \u2192 Plugins."
+    },
+    {
+      "key": "immich_api_key_default",
+      "label": "Immich API key (instance default)",
+      "input_type": "password",
+      "scope": "instance",
+      "required": false,
+      "secret": true,
+      "hint": "Optional org-wide fallback API key, paired with \"Immich server URL (instance default)\" above, for a shared Immich server. A user's own key, if set, always takes priority."
     }
   ]
 }

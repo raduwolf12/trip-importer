@@ -65,6 +65,7 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 
 - **TREK's plugin-route proxy caps every request body at ~100KB**, enforced before the plugin's own route handler runs — a request over that limit gets rejected with an HTTP 413 that **never reaches this plugin's own error handling or logs**, so the only visible symptom in the TREK UI is the import spinner never finishing. If an import seems to hang indefinitely rather than showing an error, this is the most likely cause. Every known source of this has now been windowed or moved client-side (see the Notes above) — if you still hit it, please report it with the file size/type involved.
 - **The Immich picker requires your instance admin to allow your specific Immich hostname** (see Setup) — there's no way for this plugin to request that automatically per-user, since egress for a self-hosted/user-supplied host can only be granted at the instance/operator level, not per end-user.
+- **An Immich server on a private network (LAN address, `*.local`, Tailscale, etc.) also needs `TREK_PLUGIN_ALLOW_PRIVATE_EGRESS=on` on the TREK server.** By default TREK blocks plugin requests to private/local-network hosts even once the admin has allowed the hostname, so the picker will fail to connect until that environment variable is set and TREK is restarted. See the [TREK Plugins wiki, "Allowed hosts"](https://github.com/liketrek/TREK/wiki/Plugins#allowed-hosts). A publicly reachable Immich URL doesn't need it.
 
 ## Permissions
 
