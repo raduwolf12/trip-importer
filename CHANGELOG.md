@@ -2,6 +2,11 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
+## [1.7.1] - 2026-10-08
+
+### Changed
+- Widened the supported TREK version range from `>=4.2.0 <5.0.0` to `>=4.2.0 <6.0.0` so the plugin installs and activates on the upcoming TREK 5.0.0.
+
 ## [1.7.0] - 2026-09-13
 
 ### Added
