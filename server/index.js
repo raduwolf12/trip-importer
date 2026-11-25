@@ -1578,13 +1578,23 @@ module.exports = definePlugin({
                   const contentType = resp.headers.get('content-type') || 'image/jpeg'
                   try {
                     const up = await ctx.files.create(tripId, { name: 'cover.jpg', content_base64: buf.toString('base64'), mimetype: contentType, description: 'Polarsteps cover' });
-                    const f = up?.data ?? up;
-                    // cover_image must be an /uploads/... path (max 2048), not the
-                    // /api/.../download route: journeys inherit via
-                    // firstTrip.cover_image.replace(/^\/uploads\//, '') and the frontend
-                    // prefixes /uploads/ again, so a download URL renders broken there.
+const f = up?.data ?? up;
+                    // cover_image must live in covers storage
+                    // (/uploads/covers/x.jpg -> journey inherits covers/x.jpg).
+                    // Neither the data URI (always >2048 chars) nor the
+                    // /api/.../download route nor /uploads/files/... render in
+                    // both places, so copy the uploaded bytes into covers/.
                     const fname = f?.filename ?? f?.original_name ?? null;
-                    const fileUrl = fname ? '/uploads/files/' + fname : (f?.url ?? null);
+                    let fileUrl = f?.url ?? null;
+                    if (fname) {
+                      try {
+                        const fs = require('fs');
+                        const src = '/app/uploads/files/' + fname;
+                        const dst = '/app/uploads/covers/' + fname;
+                        if (src !== dst) fs.copyFileSync(src, dst);
+                        fileUrl = '/uploads/covers/' + fname;
+                      } catch (copyErr) { fileUrl = '/uploads/files/' + fname; }
+                    }
                     if (fileUrl && String(fileUrl).length <= 2048) {
                       await ctx.trips.update(tripId, { cover_image: fileUrl });
                       log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' });
