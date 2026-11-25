@@ -39,7 +39,8 @@
     "http:outbound:maps.app.goo.gl",
     "http:outbound:goo.gl",
     "http:outbound:naver.me",
-    "http:outbound:pages.map.naver.com"
+    "http:outbound:pages.map.naver.com",
+    "http:outbound:media.prod.polarsteps.com"
   ],
   "egress": [
     "nominatim.openstreetmap.org",
@@ -48,7 +49,8 @@
     "maps.app.goo.gl",
     "goo.gl",
     "naver.me",
-    "pages.map.naver.com"
+    "pages.map.naver.com",
+    "media.prod.polarsteps.com"
   ],
   "operatorEgress": true,
   "settings": [
