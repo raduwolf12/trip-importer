@@ -1602,7 +1602,6 @@ const f = up?.data ?? up;
                       errors.push('Cover photo: uploaded file URL missing or too long');
                     }
                   } catch (e2) { errors.push('Cover photo: ' + (e2.message || e2)); }
-                  log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' })
                 }
               } catch (e) { errors.push('Cover photo: ' + e.message) }
             }
