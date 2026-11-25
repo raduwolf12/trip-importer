@@ -1576,7 +1576,17 @@ module.exports = definePlugin({
                 if (resp.ok) {
                   const buf = Buffer.from(await resp.arrayBuffer())
                   const contentType = resp.headers.get('content-type') || 'image/jpeg'
-                  await ctx.trips.update(tripId, { cover_image: 'data:' + contentType + ';base64,' + buf.toString('base64') })
+                  try {
+                    const up = await ctx.files.create(tripId, { name: 'cover.jpg', content_base64: buf.toString('base64'), mimetype: contentType, description: 'Polarsteps cover' });
+                    const upId = up?.id ?? up?.data?.id;
+                    const fileUrl = up?.url ?? up?.data?.url ?? (upId ? '/api/trips/' + tripId + '/files/' + upId + '/download' : null);
+                    if (fileUrl && String(fileUrl).length <= 2048) {
+                      await ctx.trips.update(tripId, { cover_image: fileUrl });
+                      log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' });
+                    } else {
+                      errors.push('Cover photo: uploaded file URL missing or too long');
+                    }
+                  } catch (e2) { errors.push('Cover photo: ' + (e2.message || e2)); }
                   log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' })
                 }
               } catch (e) { errors.push('Cover photo: ' + e.message) }
