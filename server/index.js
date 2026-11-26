@@ -1561,30 +1561,22 @@ module.exports = definePlugin({
 
             if (polarsteps?.uuid) await attempt(() => ctx.meta.set('trip', tripId, 'polarsteps_uuid', polarsteps.uuid))
 
-            // Import the trip's own Polarsteps cover photo, best-effort. The exact shape
-            // ctx.trips.update expects for cover_image isn't documented beyond the permission
-            // name (trip_cover_upload) — a data: URI is the closest match to how every other
-            // upload in this plugin works (ctx.files.create's content_base64) — so this is
-            // wrapped defensively and never blocks the rest of the import if the shape is wrong
-            // or the fetch fails.
+            // Use the trip's own Polarsteps cover photo, best-effort, by its CDN URL. cover_image
+            // is a string of at most 2048 chars, so the old data: URI always failed validation
+            // (#16). TREK's own cover picker stores an Unsplash pick exactly this way, as the
+            // external https URL (useTripCoverPicker.ts: update(id, {cover_image: photo.url})),
+            // and TREK's CSP allows img-src https:, so no download/upload is needed. Trade-off:
+            // the cover is hotlinked, so it disappears if Polarsteps removes the image.
             if (polarsteps?.coverPhotoUrl) {
-              try {
-                // No timeout here would risk the same problem reverseGeocode() already guards
-                // against: a slow response could eat this whole round's ~6-8s budget before
-                // anything else (day rows, journal, places) even gets a chance to run.
-                const coverController = new AbortController()
-                const coverTimeout = setTimeout(() => coverController.abort(), 3000)
-                let resp
+              const coverUrl = String(polarsteps.coverPhotoUrl)
+              if (/^https:\/\//i.test(coverUrl) && coverUrl.length <= 2048) {
                 try {
-                  resp = await fetch(polarsteps.coverPhotoUrl, { signal: coverController.signal })
-                } finally { clearTimeout(coverTimeout) }
-                if (resp.ok) {
-                  const buf = Buffer.from(await resp.arrayBuffer())
-                  const contentType = resp.headers.get('content-type') || 'image/jpeg'
-                  await ctx.trips.update(tripId, { cover_image: 'data:' + contentType + ';base64,' + buf.toString('base64') })
-                  log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' })
-                }
-              } catch (e) { errors.push('Cover photo: ' + e.message) }
+                  await ctx.trips.update(tripId, { cover_image: coverUrl })
+                  log.push({ type: 'trip', message: 'Set trip cover photo from Polarsteps' })
+                } catch (e) { errors.push('Cover photo: ' + e.message) }
+              } else {
+                errors.push('Cover photo: not a usable https URL')
+              }
             }
           }
 

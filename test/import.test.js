@@ -194,3 +194,27 @@ test('/import: journal-only with nothing to import still finishes', async () => 
   const { rounds } = await runImport(f.ctx, { tripConfig: { mode: 'new' } }, { journalOnly: true })
   assert.equal(rounds, 1)
 })
+
+test('/import: Polarsteps cover is set by its https URL, never downloaded (#16)', async () => {
+  const cover = 'https://media.prod.polarsteps.com/u_1/cover.jpg'
+  let fetched = 0
+  const s = loadServer({ fakeClock: true, fetch: async () => { fetched++; throw new Error('no network in tests') } })
+  const f = fakeCtx()
+  const r = await s.call('/import', {
+    tripConfig: { mode: 'new', title: 'T' },
+    polarsteps: { name: 'T', startDate: '2026-07-01', endDate: '2026-07-01', coverPhotoUrl: cover, steps: [] },
+    options: {},
+  }, f.ctx)
+  assert.deepEqual(f.of('trips.update').map(c => c.args[1].cover_image), [cover]) // vm-realm objects: compare values
+  assert.equal(fetched, 0)
+  assert.ok(!r.errors.some(e => e.startsWith('Cover photo')))
+
+  const g = fakeCtx()
+  const r2 = await s.call('/import', {
+    tripConfig: { mode: 'new', title: 'T' },
+    polarsteps: { name: 'T', coverPhotoUrl: 'http://insecure.example/c.jpg', steps: [] },
+    options: {},
+  }, g.ctx)
+  assert.equal(g.of('trips.update').length, 0) // mixed content would not render on an https TREK
+  assert.ok(r2.errors.includes('Cover photo: not a usable https URL'))
+})
