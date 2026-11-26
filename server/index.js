@@ -360,16 +360,34 @@ function googleMapsFeatureIdFromItem(item) {
 // still names (storage-release.service.ts, trips-storage-refs.service.ts). Returns the stored
 // cover path, or null on any failure, with nothing left behind but the error message.
 const COVER_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' }
+async function downloadCover(coverUrl) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 3000) // keep the ~6s round budget
+  let resp
+  try { resp = await fetch(coverUrl, { signal: controller.signal }) } finally { clearTimeout(timeout) }
+  if (!resp.ok) throw new Error('download failed (HTTP ' + resp.status + ')')
+  const ext = COVER_EXT[(resp.headers.get('content-type') || 'image/jpeg').split(';')[0].trim()] || '.jpg'
+  return { ext, buf: Buffer.from(await resp.arrayBuffer()) }
+}
+
+// Journal-only mode has no trip for the journey to inherit a cover from, and plugins can
+// neither update a journey nor delete a temporary trip, so the most a plugin can do is put the
+// cover into the journey's gallery: one click ("set as cover") in TREK from there.
+async function addCoverToEntry(ctx, entryId, coverUrl, errors) {
+  try {
+    const { ext, buf } = await downloadCover(coverUrl)
+    await ctx.journal.addEntryPhoto(entryId, { name: 'cover' + ext, content_base64: buf.toString('base64'), caption: 'Polarsteps cover photo' })
+    return true
+  } catch (e) {
+    errors.push('Cover photo: ' + e.message)
+    return false
+  }
+}
+
 async function storeCoverInTrek(ctx, tripId, coverUrl, entryDate, errors) {
   let tempId = null
   try {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 3000) // keep the ~6s round budget
-    let resp
-    try { resp = await fetch(coverUrl, { signal: controller.signal }) } finally { clearTimeout(timeout) }
-    if (!resp.ok) throw new Error('download failed (HTTP ' + resp.status + ')')
-    const ext = COVER_EXT[(resp.headers.get('content-type') || 'image/jpeg').split(';')[0].trim()] || '.jpg'
-    const buf = Buffer.from(await resp.arrayBuffer())
+    const { ext, buf } = await downloadCover(coverUrl)
     const temp = await ctx.journal.createJourney({ title: 'Trip Importer: temporary (cover upload)' })
     tempId = temp?.id ?? temp?.data?.id
     if (!tempId) throw new Error('could not create the temporary journey')
@@ -864,7 +882,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.5 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.6 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1505,6 +1523,11 @@ module.exports = definePlugin({
                 journeyId = journey?.id ?? journey?.data?.id
                 p.journeyId = journeyId || null
                 if (journeyId) p.createdRefs.push({ type: 'journey', id: journeyId })
+                // Cover goes into the gallery of the first entry created: the overview, else step 1.
+                if (journeyId && polarsteps.coverPhotoUrl) {
+                  if (/^https:\/\//i.test(String(polarsteps.coverPhotoUrl))) p.pendingCover = String(polarsteps.coverPhotoUrl)
+                  else errors.push('Cover photo: not a usable https URL')
+                }
                 if (journeyId && polarsteps.summary) {
                   try {
                     const introRes = await ctx.journal.createEntry(journeyId, {
@@ -1514,7 +1537,11 @@ module.exports = definePlugin({
                     })
                     p.journalEntries++
                     const introId = introRes?.id ?? introRes?.data?.id
-                    if (introId) p.createdRefs.push({ type: 'journalEntry', id: introId })
+                    if (introId) {
+                      p.createdRefs.push({ type: 'journalEntry', id: introId })
+                      if (p.pendingCover && await addCoverToEntry(ctx, introId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "Trip overview" entry (set it as the journey cover from there)'
+                      p.pendingCover = null
+                    }
                   } catch (e) { errors.push('Trip overview entry: ' + e.message) }
                 }
               } catch (e) { errors.push('Journal: ' + e.message) }
@@ -1545,6 +1572,10 @@ module.exports = definePlugin({
                   if (entryId) {
                     p.createdRefs.push({ type: 'journalEntry', id: entryId })
                     if (step.id != null) p.stepEntryIds[step.id] = entryId
+                    if (p.pendingCover) {
+                      if (await addCoverToEntry(ctx, entryId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "' + step.name + '" entry (set it as the journey cover from there)'
+                      p.pendingCover = null
+                    }
                   }
                   await sleep(100)
                 } catch (e) { errors.push('Step ' + step.name + ': ' + e.message) }
@@ -1556,6 +1587,7 @@ module.exports = definePlugin({
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
+            if (p.coverMsg) log.push({ type: 'journal', message: p.coverMsg }) // log is cumulative per round
             p.done = p.journal >= totalSteps
             return { ok: true, tripId: null, log, errors, progress: p }
           }

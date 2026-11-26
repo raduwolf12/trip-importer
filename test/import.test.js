@@ -265,3 +265,32 @@ test('/import: if storing the cover fails, the URL is set after the journey exis
   assert.equal(f.of('journal.deleteJourney').length, 0) // no temporary journey was ever created
   assert.ok(errors.some(e => e.startsWith('Cover photo (stored copy')))
 })
+
+test('/import: journal-only puts the cover into the first entry\'s gallery, once, across rounds', async () => {
+  const image = { ok: true, status: 200, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff]).buffer }
+  const s = loadServer({ fakeClock: true, fetch: async () => image })
+  const cover = 'https://polarsteps.s3.amazonaws.com/c.jpg'
+  for (const summary of [null, 'Overview']) {
+    const f = fakeCtx()
+    const steps = [1, 2, 3, 4, 5].map(n => step(n, '2026-08-0' + n))
+    let progress, rounds = 0, log
+    do { // 2 steps per round, like the client's windowing
+      const off = progress?.journal || 0
+      const r = await s.call('/import', {
+        tripConfig: { mode: 'new' }, progress, options: { journalOnly: true, importJournal: true },
+        polarsteps: { name: 'Story', startDate: '2026-08-01', summary, coverPhotoUrl: cover, steps: steps.slice(off, off + 2), _stepOffset: off, _totalSteps: 5 },
+      }, f.ctx)
+      assert.deepEqual(r.errors, [])
+      progress = r.progress; log = r.log
+    } while (!progress.done && ++rounds < 10)
+    assert.ok(rounds > 1)
+    const photos = f.of('journal.addEntryPhoto')
+    assert.equal(photos.length, 1, 'cover added exactly once')
+    const entries = f.of('journal.createEntry')
+    const firstEntryId = progress.createdRefs.find(r => r.type === 'journalEntry').id
+    assert.equal(photos[0].args[0], firstEntryId)
+    assert.equal(entries[0].args[1].title, summary ? 'Trip overview' : 'Stop 1')
+    assert.equal(f.calls.filter(c => c.name.startsWith('trips.')).length, 0) // no trip in this mode
+    assert.ok(log.some(l => l.message.startsWith('Added the Polarsteps cover photo')), 'message survives later rounds')
+  }
+})
