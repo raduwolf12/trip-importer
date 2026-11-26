@@ -4,6 +4,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
+    "test": "node --test test/server.test.js",
     "testdata": "node generate-test-data.js",
     "testdata:list": "node generate-test-data.js --list",
     "testdata:polarsteps": "node generate-test-data.js --scenario polarsteps",
@@ -15,5 +16,7 @@
     "testdata:collection": "node generate-test-data.js --scenario collection",
     "testdata:stress": "node generate-test-data.js --scenario stress"
   },
-  "devDependencies": { "trek-plugin-sdk": "^1.0.0" }
+  "devDependencies": {
+    "trek-plugin-sdk": "^1.0.0"
+  }
 }
