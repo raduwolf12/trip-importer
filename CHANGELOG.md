@@ -2,7 +2,7 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
-## [1.7.6] - 2026-11-26
+## [1.8.0] - 2026-11-26
 
 ### Fixed
 - **Polarsteps trip cover never appeared** (#16). The cover was sent as a base64 data URI, but TREK limits `cover_image` to 2048 characters, so every import logged `Cover photo: BAD_PARAMS … Too big`. When a journal is imported, the cover is now downloaded and stored in TREK, and both the trip and its journey show it. The plugin SDK can't upload a cover directly, so the photo goes through a temporary journey that is deleted straight away; TREK keeps the file because the trip cover points at it. Without a journal, or if storing fails, the cover is set by its Polarsteps `https://` URL instead (as TREK's own picker does for Unsplash), which is hotlinked.
