@@ -3109,12 +3109,15 @@ async function doImport(){
   // #trip-select, tripMode) rather than a rendered target card — those fields are never wired
   // back into tripTargets itself (that's renderTripTargets()'s job, for the multi-trip UI only),
   // so sync them here before deciding what's active.
-  var showClassic=tripTargets.length<=1&&!unassignedHasContent();
+  // Read the form the user actually saw. Re-deriving showClassic here could disagree with what
+  // prepareStep3() rendered (e.g. unassigned items were assigned in the multi-trip cards since),
+  // and then the hidden, empty #trip-title overwrote the name typed into the card.
+  var showClassic=document.getElementById('single-trip-config').style.display!=='none';
   if(showClassic&&tripTargets[0]){
     var soleTarget=tripTargets[0];
     soleTarget.mode=tripMode;
     if(tripMode==='new'){
-      soleTarget.title=document.getElementById('trip-title').value||'Imported Trip';
+      soleTarget.title=document.getElementById('trip-title').value||soleTarget.title||'Imported Trip';
       soleTarget.startDate=document.getElementById('trip-start').value||null;
       soleTarget.endDate=document.getElementById('trip-end').value||null;
     }else{

@@ -218,3 +218,17 @@ test('/import: Polarsteps cover is set by its https URL, never downloaded (#16)'
   assert.equal(g.of('trips.update').length, 0) // mixed content would not render on an https TREK
   assert.ok(r2.errors.includes('Cover photo: not a usable https URL'))
 })
+
+test('/import: trip cover is set only after the journey exists, so the journey never inherits it', async () => {
+  // createJourney copies the trip's cover and renders it as /uploads/<value>: an external URL
+  // inherited that way is a broken image on the journey.
+  const f = fakeCtx()
+  const { result } = await runImport(f.ctx, {
+    tripConfig: { mode: 'new', title: 'T' },
+    polarsteps: { name: 'T', startDate: '2026-07-01', endDate: '2026-07-01', coverPhotoUrl: 'https://media.prod.polarsteps.com/c.jpg', steps: [step(1, '2026-07-01')] },
+  }, { importJournal: true })
+  const order = f.calls.map(c => c.name)
+  assert.equal(f.of('trips.update').length, 1)
+  assert.ok(order.indexOf('journal.createJourney') < order.indexOf('trips.update'))
+  assert.equal(result.progress.pendingCover, null)
+})

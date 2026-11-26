@@ -824,7 +824,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.3 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.4 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1567,16 +1567,11 @@ module.exports = definePlugin({
             // external https URL (useTripCoverPicker.ts: update(id, {cover_image: photo.url})),
             // and TREK's CSP allows img-src https:, so no download/upload is needed. Trade-off:
             // the cover is hotlinked, so it disappears if Polarsteps removes the image.
+            // Only queued here: it's applied after the journey exists (see "Trip cover" below).
             if (polarsteps?.coverPhotoUrl) {
               const coverUrl = String(polarsteps.coverPhotoUrl)
-              if (/^https:\/\//i.test(coverUrl) && coverUrl.length <= 2048) {
-                try {
-                  await ctx.trips.update(tripId, { cover_image: coverUrl })
-                  log.push({ type: 'trip', message: 'Set trip cover photo from Polarsteps' })
-                } catch (e) { errors.push('Cover photo: ' + e.message) }
-              } else {
-                errors.push('Cover photo: not a usable https URL')
-              }
+              if (/^https:\/\//i.test(coverUrl) && coverUrl.length <= 2048) p.pendingCover = coverUrl
+              else errors.push('Cover photo: not a usable https URL')
             }
           }
 
@@ -1876,6 +1871,21 @@ module.exports = definePlugin({
               }
             } catch (e) { errors.push('Journal: ' + e.message) }
           }
+
+          // ── Trip cover, set only once the journey exists ───────────────────
+          // createJourney copies the first linked trip's cover onto the journey, stripping a
+          // leading /uploads/ (TREK journey-domain.service.ts), and the journey page renders it
+          // as /uploads/<value>. An external https cover therefore breaks the journey's cover,
+          // so it goes on the trip after the journey is created; the journey keeps TREK's
+          // default look instead. The SDK has no way to update a journey's own cover.
+          if (p.pendingCover) {
+            try {
+              await ctx.trips.update(tripId, { cover_image: p.pendingCover })
+              log.push({ type: 'trip', message: 'Set trip cover photo from Polarsteps' })
+            } catch (e) { errors.push('Cover photo: ' + e.message) }
+            p.pendingCover = null
+          }
+
           if (journalActive) {
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journalDayNotes) msg += ', ' + p.journalDayNotes + ' day notes'
