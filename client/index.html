@@ -1465,7 +1465,7 @@ async function doAnalyze(){
       // a large export can have hundreds of multi-MB photos, and reading them all into
       // ArrayBuffers up front is exactly what made this wizard fail on a 500MB+ trip. The
       // entry itself stays decompressable for the rest of the session either way.
-      for(var pe of photoEntries.slice(0,300)){
+      for(var pe of photoEntries.slice(0,2000)){
         imgFiles.push({_zipEntry:pe.entry,name:pe.name,_fromZip:true});
       }
     }catch(e){
@@ -1477,7 +1477,7 @@ async function doAnalyze(){
   // doImport() can look up "this step's photos" once it knows that step's created placeId.
   // Bytes are read lazily via getFileBuffer(), same reasoning as the generic photos above.
   var stepPhotosByStepId={};
-  for(var spe of stepPhotoEntries.slice(0,500)){
+  for(var spe of stepPhotoEntries.slice(0,5000)){
     (stepPhotosByStepId[spe.stepId]=stepPhotosByStepId[spe.stepId]||[]).push({_zipEntry:spe.entry,name:spe.name});
   }
   parsed._stepPhotosByStepId=stepPhotosByStepId; // read by doImport() after places are created
