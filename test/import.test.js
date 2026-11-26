@@ -29,7 +29,12 @@ function fakeCtx() {
       update: rec('trips.update', {}),
     },
     days: { create: rec('days.create', (t, { date }) => { const d = { id: nextId++, date }; (days[t] = days[t] || []).push(d); return d }) },
-    journal: { createJourney: rec('journal.createJourney', newId), createEntry: rec('journal.createEntry', newId) },
+    journal: {
+      createJourney: rec('journal.createJourney', newId),
+      createEntry: rec('journal.createEntry', newId),
+      addEntryPhoto: rec('journal.addEntryPhoto', () => ({ id: nextId++, file_path: 'journey/abc.jpg' })),
+      deleteJourney: rec('journal.deleteJourney', { deleted: true }),
+    },
     places: { create: rec('places.create', newId) },
     itinerary: { assign: rec('itinerary.assign', {}) },
     daynotes: { create: rec('daynotes.create', newId) },
@@ -195,7 +200,7 @@ test('/import: journal-only with nothing to import still finishes', async () => 
   assert.equal(rounds, 1)
 })
 
-test('/import: Polarsteps cover is set by its https URL, never downloaded (#16)', async () => {
+test('/import: without a journal, the Polarsteps cover is set by its https URL, never downloaded (#16)', async () => {
   const cover = 'https://media.prod.polarsteps.com/u_1/cover.jpg'
   let fetched = 0
   const s = loadServer({ fakeClock: true, fetch: async () => { fetched++; throw new Error('no network in tests') } })
@@ -219,16 +224,44 @@ test('/import: Polarsteps cover is set by its https URL, never downloaded (#16)'
   assert.ok(r2.errors.includes('Cover photo: not a usable https URL'))
 })
 
-test('/import: trip cover is set only after the journey exists, so the journey never inherits it', async () => {
-  // createJourney copies the trip's cover and renders it as /uploads/<value>: an external URL
-  // inherited that way is a broken image on the journey.
+test('/import: with a journal, the cover is stored in TREK before the journey, so the journey inherits it', async () => {
+  const image = { ok: true, status: 200, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff]).buffer }
+  const s = loadServer({ fakeClock: true, fetch: async () => image })
   const f = fakeCtx()
-  const { result } = await runImport(f.ctx, {
+  const r = await s.call('/import', {
+    tripConfig: { mode: 'new', title: 'T' },
+    polarsteps: { name: 'T', startDate: '2026-07-01', endDate: '2026-07-01', coverPhotoUrl: 'https://media.prod.polarsteps.com/c.jpg', steps: [step(1, '2026-07-01')] },
+    options: { importJournal: true },
+  }, f.ctx)
+  assert.deepEqual(r.errors, [])
+  const journeys = f.of('journal.createJourney')
+  assert.equal(journeys.length, 2) // the temporary one, then the real one
+  assert.equal(journeys[0].args[0].trip_ids, undefined) // temporary: linked to nothing
+  assert.deepEqual([...journeys[1].args[0].trip_ids], [r.tripId])
+  assert.equal(f.of('journal.addEntryPhoto')[0].args[1].name, 'cover.jpg')
+  assert.deepEqual(f.of('trips.update').map(c => c.args[1].cover_image), ['/uploads/journey/abc.jpg'])
+  // trip cover set, then the temporary journey deleted, then the real journey created
+  const at = name => f.calls.findIndex(c => c.name === name)
+  const realJourney = f.calls.lastIndexOf(journeys[1])
+  assert.ok(at('trips.update') < at('journal.deleteJourney') && at('journal.deleteJourney') < realJourney)
+  assert.equal(f.of('journal.deleteJourney').length, 1)
+  assert.notEqual(f.of('journal.deleteJourney')[0].args[0], r.progress.journeyId) // the real journey stays
+})
+
+test('/import: if storing the cover fails, the URL is set after the journey exists, so the journey never inherits it', async () => {
+  // The module-level fetch stub returns no image, so the stored copy fails and the URL
+  // fallback runs. createJourney copies the trip's cover and renders it as /uploads/<value>:
+  // an external URL inherited that way is a broken image on the journey.
+  const f = fakeCtx()
+  const { result, errors } = await runImport(f.ctx, {
     tripConfig: { mode: 'new', title: 'T' },
     polarsteps: { name: 'T', startDate: '2026-07-01', endDate: '2026-07-01', coverPhotoUrl: 'https://media.prod.polarsteps.com/c.jpg', steps: [step(1, '2026-07-01')] },
   }, { importJournal: true })
   const order = f.calls.map(c => c.name)
   assert.equal(f.of('trips.update').length, 1)
-  assert.ok(order.indexOf('journal.createJourney') < order.indexOf('trips.update'))
+  assert.equal(f.of('trips.update')[0].args[1].cover_image, 'https://media.prod.polarsteps.com/c.jpg')
+  assert.ok(order.lastIndexOf('journal.createJourney') < order.indexOf('trips.update'))
   assert.equal(result.progress.pendingCover, null)
+  assert.equal(f.of('journal.deleteJourney').length, 0) // no temporary journey was ever created
+  assert.ok(errors.some(e => e.startsWith('Cover photo (stored copy')))
 })

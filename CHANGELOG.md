@@ -2,11 +2,11 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
-## [1.7.4] - 2026-11-26
+## [1.7.5] - 2026-11-26
 
 ### Fixed
-- **Polarsteps trip cover never appeared** (#16). The cover was sent as a base64 data URI, but TREK limits `cover_image` to 2048 characters, so every import logged `Cover photo: BAD_PARAMS … Too big`. The cover is now set by its Polarsteps `https://` URL, the same way TREK's own cover picker stores an Unsplash pick. Nothing is downloaded or uploaded. The cover is hotlinked, so it disappears if Polarsteps removes the image.
-- **Journey cover showed as a broken image.** TREK copies a trip's cover onto a journey created for it, and displays a journey cover as `/uploads/<value>`, so an external `https` cover breaks there. The trip cover is now set only after the journey is created, so the journey keeps TREK's default look. The plugin SDK has no way to set a journey's own cover.
+- **Polarsteps trip cover never appeared** (#16). The cover was sent as a base64 data URI, but TREK limits `cover_image` to 2048 characters, so every import logged `Cover photo: BAD_PARAMS … Too big`. When a journal is imported, the cover is now downloaded and stored in TREK, and both the trip and its journey show it. The plugin SDK can't upload a cover directly, so the photo goes through a temporary journey that is deleted straight away; TREK keeps the file because the trip cover points at it. Without a journal, or if storing fails, the cover is set by its Polarsteps `https://` URL instead (as TREK's own picker does for Unsplash), which is hotlinked.
+- **Journey cover showed as a broken image.** TREK copies a trip's cover onto a new journey and displays it as `/uploads/<value>`, so an external `https` cover breaks there. A URL cover is therefore only set on the trip after the journey is created.
 - **A typed trip name could be replaced by "Imported Trip".** The import re-decided whether the single-trip form or the per-trip cards had been shown. When that changed in between (for example after assigning leftover items), it read the hidden, empty single-trip name field. It now reads the form that was actually on screen.
 - **Covers hosted on `media.prod.polarsteps.com` were blocked by egress** (#15, PR #18).
 - **Large multi-trip ZIP exports silently lost step photos** past fixed caps of 300 generic and 500 step photos (#17, PR #20). The caps are now 2000 and 5000.

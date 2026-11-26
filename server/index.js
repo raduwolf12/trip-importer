@@ -350,6 +350,46 @@ function googleMapsFeatureIdFromItem(item) {
   return null
 }
 
+// Puts the Polarsteps cover into TREK's own storage and makes it the trip's cover, so a journey
+// created afterwards inherits it. TREK copies the first linked trip's cover onto a new journey
+// with /uploads/ stripped and renders it as /uploads/<value>, so an external URL breaks there.
+// The SDK can't upload a trip cover or change a journey's cover, but journal.addEntryPhoto
+// stores bytes as journey/<uuid>.<ext>, so: a temporary journey holds the photo just long
+// enough to store it, the trip cover points at /uploads/journey/<uuid>.<ext>, and the temporary
+// journey is deleted. TREK only queues a deleted journey's files and keeps any a trip cover
+// still names (storage-release.service.ts, trips-storage-refs.service.ts). Returns the stored
+// cover path, or null on any failure, with nothing left behind but the error message.
+const COVER_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' }
+async function storeCoverInTrek(ctx, tripId, coverUrl, entryDate, errors) {
+  let tempId = null
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 3000) // keep the ~6s round budget
+    let resp
+    try { resp = await fetch(coverUrl, { signal: controller.signal }) } finally { clearTimeout(timeout) }
+    if (!resp.ok) throw new Error('download failed (HTTP ' + resp.status + ')')
+    const ext = COVER_EXT[(resp.headers.get('content-type') || 'image/jpeg').split(';')[0].trim()] || '.jpg'
+    const buf = Buffer.from(await resp.arrayBuffer())
+    const temp = await ctx.journal.createJourney({ title: 'Trip Importer: temporary (cover upload)' })
+    tempId = temp?.id ?? temp?.data?.id
+    if (!tempId) throw new Error('could not create the temporary journey')
+    const entry = await ctx.journal.createEntry(tempId, { entry_date: entryDate || null, title: 'Cover' })
+    const entryId = entry?.id ?? entry?.data?.id
+    const photo = await ctx.journal.addEntryPhoto(entryId, { name: 'cover' + ext, content_base64: buf.toString('base64') })
+    const filePath = photo?.file_path ?? photo?.data?.file_path
+    if (!filePath) throw new Error('TREK returned no stored path for the photo')
+    const cover = '/uploads/' + String(filePath).replace(/^\/?uploads\//, '')
+    // Before deleting the temporary journey, so the trip already names the file.
+    await ctx.trips.update(tripId, { cover_image: cover })
+    return cover
+  } catch (e) {
+    errors.push('Cover photo (stored copy, falling back to the Polarsteps URL): ' + e.message)
+    return null
+  } finally {
+    if (tempId) await attempt(() => ctx.journal.deleteJourney(tempId))
+  }
+}
+
 // Quote-aware CSV/TSV line splitter shared by /parse-csv and /parse-places-csv. Uses ONE
 // delimiter, picked from the header: splitting on , ; and tab at once broke every decimal-comma
 // value in a ;-separated European export ("20,00" -> "20" | "00", "55,67" lat -> "55" | "67").
@@ -824,7 +864,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.4 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.5 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1725,6 +1765,16 @@ module.exports = definePlugin({
               // Only relevant when journalActive — a places-only import has no journey at all.
               let journeyId = p.journeyId
               if (journalActive && !journeyId) {
+                // Store the cover in TREK first, so the journey created next inherits a cover
+                // it can display (see storeCoverInTrek()). On failure p.pendingCover keeps the
+                // URL, which is set on the trip after the journey exists, as before.
+                if (p.pendingCover) {
+                  const stored = await storeCoverInTrek(ctx, tripId, p.pendingCover, polarsteps.startDate, errors)
+                  if (stored) {
+                    p.pendingCover = null
+                    log.push({ type: 'trip', message: 'Set trip and journey cover photo from Polarsteps' })
+                  }
+                }
                 const journey = await ctx.journal.createJourney({
                   title: polarsteps.name,
                   subtitle: polarsteps.totalKm ? polarsteps.totalKm.toLocaleString() + ' km travelled' : null,
