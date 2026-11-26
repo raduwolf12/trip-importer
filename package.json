@@ -4,7 +4,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node --test test/server.test.js",
+    "test": "node --test test/*.test.js",
     "testdata": "node generate-test-data.js",
     "testdata:list": "node generate-test-data.js --list",
     "testdata:polarsteps": "node generate-test-data.js --scenario polarsteps",
