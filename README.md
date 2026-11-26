@@ -94,6 +94,7 @@ A Polarsteps ZIP with multiple trips detected inside becomes multiple separate T
 | `hook:table-contributor` | Adds a "Source" column to imported places and reservations in the trip planner's own tables |
 | `http:outbound:nominatim.openstreetmap.org` | Reverse geocoding for GPS places |
 | `http:outbound:polarsteps.s3.amazonaws.com` | Fetching the trip cover photo and step photos directly from Polarsteps' own CDN |
+| `http:outbound:media.prod.polarsteps.com` | Fetching trip cover photos that Polarsteps serves from its newer media host instead of the S3 CDN above |
 | `http:outbound:www.google.com` | Resolving a pasted Google Maps list link and fetching its places (Collection mode) |
 | `http:outbound:maps.app.goo.gl` / `http:outbound:goo.gl` | Following a shortened Google Maps list link to its real URL |
 | `http:outbound:naver.me` | Following a shortened Naver Maps list link to its real URL |
