@@ -17,6 +17,6 @@
     "testdata:stress": "node generate-test-data.js --scenario stress"
   },
   "devDependencies": {
-    "trek-plugin-sdk": "^1.0.0"
+    "trek-plugin-sdk": "^1.10.0"
   }
 }
