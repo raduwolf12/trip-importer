@@ -372,7 +372,8 @@ async function downloadCover(coverUrl) {
 
 // Journal-only mode has no trip for the journey to inherit a cover from, and plugins can
 // neither update a journey nor delete a temporary trip, so the most a plugin can do is put the
-// cover into the journey's gallery: one click ("set as cover") in TREK from there.
+// cover into the journey's gallery. TREK's UI has no "use gallery photo as cover"; the
+// journey cover can only be uploaded from the device in its settings.
 async function addCoverToEntry(ctx, entryId, coverUrl, errors) {
   try {
     const { ext, buf } = await downloadCover(coverUrl)
@@ -1539,7 +1540,7 @@ module.exports = definePlugin({
                     const introId = introRes?.id ?? introRes?.data?.id
                     if (introId) {
                       p.createdRefs.push({ type: 'journalEntry', id: introId })
-                      if (p.pendingCover && await addCoverToEntry(ctx, introId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "Trip overview" entry (set it as the journey cover from there)'
+                      if (p.pendingCover && await addCoverToEntry(ctx, introId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "Trip overview" entry (TREK lets plugins set a journey cover only through a linked trip, so journal-only journeys keep the default cover)'
                       p.pendingCover = null
                     }
                   } catch (e) { errors.push('Trip overview entry: ' + e.message) }
@@ -1573,7 +1574,7 @@ module.exports = definePlugin({
                     p.createdRefs.push({ type: 'journalEntry', id: entryId })
                     if (step.id != null) p.stepEntryIds[step.id] = entryId
                     if (p.pendingCover) {
-                      if (await addCoverToEntry(ctx, entryId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "' + step.name + '" entry (set it as the journey cover from there)'
+                      if (await addCoverToEntry(ctx, entryId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "' + step.name + '" entry (TREK lets plugins set a journey cover only through a linked trip, so journal-only journeys keep the default cover)'
                       p.pendingCover = null
                     }
                   }
