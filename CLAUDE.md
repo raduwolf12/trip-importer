@@ -12,7 +12,7 @@ This is an unusually flat repo — **do not expect a src/ tree, a bundler, or pe
 
 - `server/index.js` — the *entire* backend. One `definePlugin({ onLoad, routes })` call with all route handlers and parsing/import logic written inline (no separate parser modules, no `require`d local files).
 - `client/index.html` — the *entire* frontend, one file. CSS, vendored libraries (JSZip v3.10.1, exifr, and pdf.js v2.16.105 legacy build — all minified and pasted inline as `<script>` blocks), and the app's own vanilla ES5-style JS (`var`, no framework, no JSX/TSX). No build step produces this file — it's edited directly. **Every vendored library must be inlined, not shipped as a separate file** — see the CORP gotcha below; this was tried and confirmed broken.
-- No `tsconfig.json`, `.eslintrc`, test framework, or build config exists anywhere in the repo. No `client/package.json` or `server/package.json` — the root `package.json` (with `trek-plugin-sdk` as sole devDependency) is the only manifest.
+- No `tsconfig.json`, `.eslintrc`, test framework (beyond Node's built-in `node:test`, see below), or build config exists anywhere in the repo. No `client/package.json` or `server/package.json` — the root `package.json` (with `trek-plugin-sdk` as sole devDependency) is the only manifest.
 
 Vendoring client libraries (instead of npm+bundle) is deliberate: the client runs in a sandboxed, egress-restricted iframe (only `nominatim.openstreetmap.org` is allowed per `trek-plugin.json`), so it can't load anything from a CDN at runtime.
 
@@ -24,7 +24,9 @@ pdf.js additionally needs a Worker, and a `blob:`-URL worker would violate CSP (
 
 ## Commands
 
-Plugin development itself has **no build/lint/test command** — there is nothing to compile and no test suite for `server/index.js`/`client/index.html`. That workflow is entirely through the `trek-plugin-sdk` CLI (the sole devDependency), invoked directly:
+**`npm test`** runs `test/server.test.js` (`node:test`, no dependencies): regression tests for the `server/index.js` parsers, using fixtures that `generate-test-data.js` writes into a temp dir. `test/load-server.js` loads `server/index.js` **unchanged** in a `vm` context, with `trek-plugin-sdk` stubbed, so top-level helper functions and route handlers can be called directly — no exports needed. When fixing a parser bug, add its case there. `client/index.html` has no tests (DOM-bound, one file).
+
+There is nothing to compile. Building and publishing go entirely through the `trek-plugin-sdk` CLI. That workflow is entirely through the `trek-plugin-sdk` CLI (the sole devDependency), invoked directly:
 
 ```
 npx trek-plugin-sdk dev       # local dev/hot-reload against a TREK instance

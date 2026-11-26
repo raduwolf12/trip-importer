@@ -2,6 +2,17 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
+## [1.7.2] - 2026-11-26
+
+### Fixed
+- **Semicolon-separated CSVs lost every decimal-comma value.** The expense and place-list CSV parsers split each line on `,`, `;` and tab all at once, so in a European `;`-separated export `20,00` became two columns, shifting currency and category for every row. Both routes now share one quote-aware splitter (`csvLineParser()`) that uses a single delimiter picked from the header row.
+- **Place-list CSV rows with decimal-comma coordinates (`55,6798`) were silently skipped**, because the coordinate parsed as `NaN`.
+- **Swedish rail e-tickets found no bookings.** The multi-leg rail detector only matched `Train NNNN`; it now also accepts `Tåg`, `Tog` and `Zug`.
+- **Bus bookings without a known operator name never parsed.** The loose route fallback was only reached when a listed operator (FlixBus, RegioJet, …) appeared, and its route pattern couldn't match a `Route: A – B` line. A generic "bus"/"coach" mention now counts only when a route is also found, so a passing mention ("free airport bus") can't create a booking.
+
+### Added
+- `npm test`: regression tests for the server parsers (`test/server.test.js`, Node's built-in `node:test`, no new dependencies), using fixtures from `generate-test-data.js`.
+
 ## [1.7.1] - 2026-10-08
 
 ### Changed

@@ -528,7 +528,9 @@ function generateExpensesLocalized() {
     ['2026-09-17', 'Museum entry', '978.00', 'USD', 'activities'],
     ['2026-09-17', 'Coffee', '20.5', 'USD', 'food'],
   ]
-  return rows.map(r => r.join(',')).join('\n')
+  // Quote any cell containing the delimiter, like a real export does — unquoted "1 978,00" in a
+  // comma CSV is a different row shape entirely (amount "1 978", currency "00").
+  return rows.map(r => r.map(c => c.includes(',') ? '"' + c + '"' : c).join(',')).join('\n')
 }
 
 // Edge cases beyond localization: a refund (negative amount), a row with no currency column

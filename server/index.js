@@ -350,6 +350,22 @@ function googleMapsFeatureIdFromItem(item) {
   return null
 }
 
+// Quote-aware CSV/TSV line splitter shared by /parse-csv and /parse-places-csv. Uses ONE
+// delimiter, picked from the header: splitting on , ; and tab at once broke every decimal-comma
+// value in a ;-separated European export ("20,00" -> "20" | "00", "55,67" lat -> "55" | "67").
+function csvLineParser(headerLine) {
+  const delim = ['\t', ';', ','].map(d => [d, String(headerLine || '').split(d).length]).sort((a, b) => b[1] - a[1])[0][0]
+  return function parseCSVLine(line) {
+    const r = []; let cur = '', inQ = false
+    for (const c of line) {
+      if (c === '"') inQ = !inQ
+      else if (c === delim && !inQ) { r.push(cur.trim()); cur = '' }
+      else cur += c
+    }
+    r.push(cur.trim()); return r
+  }
+}
+
 // ── Distance between two coords in metres ────────────────────────────────────
 function haversine(lat1, lng1, lat2, lng2) {
   const R = 6371000
@@ -491,7 +507,7 @@ function parseBookingsRegex(text) {
   // "HH:MM  From Station  HH:MM  To Station  Train NNNN" — matched here BEFORE
   // flight detection, because a train/service number like "SJ 3000" would
   // otherwise false-match the [A-Z]{2}\d{3,4} flight-number pattern below.
-  const legRe = /(\d{1,2}:\d{2})\s+([\p{L}][\p{L} .'-]{1,40}?)\s+(\d{1,2}:\d{2})\s+([\p{L}][\p{L} .'-]{1,40}?)\s+Train\s+(\d+)/gu
+  const legRe = /(\d{1,2}:\d{2})\s+([\p{L}][\p{L} .'-]{1,40}?)\s+(\d{1,2}:\d{2})\s+([\p{L}][\p{L} .'-]{1,40}?)\s+(?:Train|Tåg|Tog|Zug)\s+(\d+)/gu
   const legOperatorRe = /\b(SJ|Öresundståg|Oresundstag|Resplus|SNCF|Trenitalia|Renfe|Eurostar|Thalys|ICE|TGV|Amtrak|DB|MAV|Intercity)\b/i
   // dateMarks (built above alongside allDates) already holds every written-date match with its string
   // position — reuse it to attach the nearest preceding date to each leg.
@@ -613,20 +629,24 @@ function parseBookingsRegex(text) {
   // ── Detect buses / trains ──────────────────────────────────────────────────
   const busRe = /\b(flixbus|eurolines|regiojet|blablabus|ouibus|megabus|nationalexpress|intercars)\b/i
   const trainRe = /\b(intercity|eurostar|thalys|ice|tgv|renfe|trenitalia|db bahn|amtrak|sncf|mav|öresundståg|oresundstag|resplus|sj ab)\b/i
-  const busMatch = busRe.exec(full)
+  let busMatch = busRe.exec(full)
   const trainMatch = trainRe.exec(full)
+
+  // Find route — look for "City A - City B", "City A to City B", or "City A–City B" (en dash).
+  // Each side must be 1-3 Title-Case words (allowing accented letters: Göteborg, Malmö, …) starting
+  // right after a field boundary (line start, "Label:" or 2+ spaces) — anchoring on capitalization
+  // instead of a loose "any letters" class avoids swallowing unrelated lowercase filler text
+  // ("your journey", …) or stray hyphens inside reference numbers. `m` so ^/$ are per line.
+  const titleWord = "[A-ZÀ-Þ][\\p{Ll}'-]*"
+  const placeName = titleWord + '(?: ' + titleWord + '){0,2}'
+  const routePat = new RegExp('(?:^|(?<=\\s{2})|(?<=:\\s*))(' + placeName + ')\\s*(?:to|-|–|→)\\s*(' + placeName + ')(?=\\s{2}|$)', 'mu')
+  const rm = routePat.exec(full)
+  // No known operator: a bare "bus"/"coach" only counts alongside a real route, so a passing
+  // mention ("airport bus") in a hotel/flight confirmation can't invent a bus booking.
+  if (!busMatch && !trainMatch && rm) busMatch = /\b(bus|coach)\b/i.exec(full)
 
   if (busMatch || trainMatch) {
     const op = busMatch ? busMatch[1] : trainMatch[1]
-    // Find route — look for "City A - City B", "City A to City B", or "City A–City B" (en dash).
-    // Each side must be 1-3 Title-Case words (allowing accented letters: Göteborg, Malmö, …) starting
-    // right after a field boundary (line start or 2+ spaces) — anchoring on capitalization instead of
-    // a loose "any letters" class avoids swallowing unrelated lowercase filler text ("your journey", …)
-    // or stray hyphens inside reference numbers.
-    const titleWord = "[A-ZÀ-Þ][\\p{Ll}'-]*"
-    const placeName = titleWord + '(?: ' + titleWord + '){0,2}'
-    const routePat = new RegExp('(?:^|(?<=\\s{2}))(' + placeName + ')\\s*(?:to|-|–|→)\\s*(' + placeName + ')(?=\\s{2}|$)', 'u')
-    const rm = routePat.exec(full)
     bookings.push({
       _id: 'bt0',
       type: busMatch ? 'bus' : 'train',
@@ -804,7 +824,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.1 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.2 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -902,16 +922,8 @@ module.exports = definePlugin({
         const aiEnhance = req.body?.aiEnhance !== false
         if (!text) return safeJson(200, { expenses: [] })
         const result = await tryAttempt(async () => {
-          function parseCSVLine(line) {
-            const r = []; let cur = '', inQ = false
-            for (const c of line) {
-              if (c === '"') inQ = !inQ
-              else if ((c === ',' || c === ';' || c === '\t') && !inQ) { r.push(cur.trim()); cur = '' }
-              else cur += c
-            }
-            r.push(cur.trim()); return r
-          }
           const lines = text.trim().split('\n').filter(l => l.trim())
+          const parseCSVLine = csvLineParser(lines[0])
           if (lines.length < 2) return { expenses: [], error: 'Need header + data rows' }
           const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
           const findCol = (...ns) => ns.map(n => headers.indexOf(n)).find(i => i >= 0) ?? -1
@@ -1039,16 +1051,8 @@ module.exports = definePlugin({
         const text = req.body?.text
         if (!text) return safeJson(200, { places: [] })
         const result = await tryAttempt(async () => {
-          function parseCSVLine(line) {
-            const r = []; let cur = '', inQ = false
-            for (const c of line) {
-              if (c === '"') inQ = !inQ
-              else if ((c === ',' || c === ';' || c === '\t') && !inQ) { r.push(cur.trim()); cur = '' }
-              else cur += c
-            }
-            r.push(cur.trim()); return r
-          }
           const lines = text.trim().split('\n').filter(l => l.trim())
+          const parseCSVLine = csvLineParser(lines[0])
           if (lines.length < 2) return { places: [], error: 'Need header + data rows' }
           const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''))
           const findCol = (...ns) => ns.map(n => headers.indexOf(n)).find(i => i >= 0) ?? -1
@@ -1063,8 +1067,9 @@ module.exports = definePlugin({
           for (let i = 1; i < lines.length; i++) {
             const cols = parseCSVLine(lines[i])
             if (!cols.length || cols.every(c => !c)) continue
-            const lat = latCol >= 0 ? Number(cols[latCol]) : NaN
-            const lng = lngCol >= 0 ? Number(cols[lngCol]) : NaN
+            // Coordinates never carry thousands separators, so a comma can only be a decimal comma.
+            const lat = latCol >= 0 ? Number(String(cols[latCol]).replace(',', '.')) : NaN
+            const lng = lngCol >= 0 ? Number(String(cols[lngCol]).replace(',', '.')) : NaN
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue
             const name = nameCol >= 0 ? cols[nameCol] || null : null
             places.push({
