@@ -24,7 +24,7 @@ pdf.js additionally needs a Worker, and a `blob:`-URL worker would violate CSP (
 
 ## Commands
 
-**`npm test`** runs `test/server.test.js` (`node:test`, no dependencies): regression tests for the `server/index.js` parsers, using fixtures that `generate-test-data.js` writes into a temp dir. `test/load-server.js` loads `server/index.js` **unchanged** in a `vm` context, with `trek-plugin-sdk` stubbed, so top-level helper functions and route handlers can be called directly — no exports needed. When fixing a parser bug, add its case there. `client/index.html` has no tests (DOM-bound, one file).
+**`npm test`** runs `test/server.test.js` (`node:test`, no dependencies): regression tests for the `server/index.js` parsers, using fixtures that `generate-test-data.js` writes into a temp dir. `test/load-server.js` loads `server/index.js` **unchanged** in a `vm` context, with `trek-plugin-sdk` stubbed, so top-level helper functions and route handlers can be called directly — no exports needed. When fixing a parser bug, add its case there. `test/import.test.js` smoke-tests `/import` end to end: a fake `ctx` records every call, `runImport()` replays the client's resumable round loop with the same windowing as `importOneTarget()`, and `loadServer({fakeClock:true})` makes `sleep()` advance simulated time, so the 6s budget really runs out mid-round, in milliseconds. If you change `/import`'s progress/pagination shape or the client's windowing, keep `runImport()` in step with it. `client/index.html` has no tests (DOM-bound, one file).
 
 There is nothing to compile. Building and publishing go entirely through the `trek-plugin-sdk` CLI. That workflow is entirely through the `trek-plugin-sdk` CLI (the sole devDependency), invoked directly:
 
