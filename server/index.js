@@ -350,6 +350,65 @@ function googleMapsFeatureIdFromItem(item) {
   return null
 }
 
+// Puts the Polarsteps cover into TREK's own storage and makes it the trip's cover, so a journey
+// created afterwards inherits it. TREK copies the first linked trip's cover onto a new journey
+// with /uploads/ stripped and renders it as /uploads/<value>, so an external URL breaks there.
+// The SDK can't upload a trip cover or change a journey's cover, but journal.addEntryPhoto
+// stores bytes as journey/<uuid>.<ext>, so: a temporary journey holds the photo just long
+// enough to store it, the trip cover points at /uploads/journey/<uuid>.<ext>, and the temporary
+// journey is deleted. TREK only queues a deleted journey's files and keeps any a trip cover
+// still names (storage-release.service.ts, trips-storage-refs.service.ts). Returns the stored
+// cover path, or null on any failure, with nothing left behind but the error message.
+const COVER_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' }
+async function downloadCover(coverUrl) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 3000) // keep the ~6s round budget
+  let resp
+  try { resp = await fetch(coverUrl, { signal: controller.signal }) } finally { clearTimeout(timeout) }
+  if (!resp.ok) throw new Error('download failed (HTTP ' + resp.status + ')')
+  const ext = COVER_EXT[(resp.headers.get('content-type') || 'image/jpeg').split(';')[0].trim()] || '.jpg'
+  return { ext, buf: Buffer.from(await resp.arrayBuffer()) }
+}
+
+// Journal-only mode has no trip for the journey to inherit a cover from, and plugins can
+// neither update a journey nor delete a temporary trip, so the most a plugin can do is put the
+// cover into the journey's gallery. TREK's UI has no "use gallery photo as cover"; the
+// journey cover can only be uploaded from the device in its settings.
+async function addCoverToEntry(ctx, entryId, coverUrl, errors) {
+  try {
+    const { ext, buf } = await downloadCover(coverUrl)
+    await ctx.journal.addEntryPhoto(entryId, { name: 'cover' + ext, content_base64: buf.toString('base64'), caption: 'Polarsteps cover photo' })
+    return true
+  } catch (e) {
+    errors.push('Cover photo: ' + e.message)
+    return false
+  }
+}
+
+async function storeCoverInTrek(ctx, tripId, coverUrl, entryDate, errors) {
+  let tempId = null
+  try {
+    const { ext, buf } = await downloadCover(coverUrl)
+    const temp = await ctx.journal.createJourney({ title: 'Trip Importer: temporary (cover upload)' })
+    tempId = temp?.id ?? temp?.data?.id
+    if (!tempId) throw new Error('could not create the temporary journey')
+    const entry = await ctx.journal.createEntry(tempId, { entry_date: entryDate || null, title: 'Cover' })
+    const entryId = entry?.id ?? entry?.data?.id
+    const photo = await ctx.journal.addEntryPhoto(entryId, { name: 'cover' + ext, content_base64: buf.toString('base64') })
+    const filePath = photo?.file_path ?? photo?.data?.file_path
+    if (!filePath) throw new Error('TREK returned no stored path for the photo')
+    const cover = '/uploads/' + String(filePath).replace(/^\/?uploads\//, '')
+    // Before deleting the temporary journey, so the trip already names the file.
+    await ctx.trips.update(tripId, { cover_image: cover })
+    return cover
+  } catch (e) {
+    errors.push('Cover photo (stored copy, falling back to the Polarsteps URL): ' + e.message)
+    return null
+  } finally {
+    if (tempId) await attempt(() => ctx.journal.deleteJourney(tempId))
+  }
+}
+
 // Quote-aware CSV/TSV line splitter shared by /parse-csv and /parse-places-csv. Uses ONE
 // delimiter, picked from the header: splitting on , ; and tab at once broke every decimal-comma
 // value in a ;-separated European export ("20,00" -> "20" | "00", "55,67" lat -> "55" | "67").
@@ -824,7 +883,7 @@ function instrumentRoutes(routes) {
 }
 
 module.exports = definePlugin({
-  async onLoad(ctx) { ctx.log.info('trip-importer v1.7.2 loaded') },
+  async onLoad(ctx) { ctx.log.info('trip-importer v1.8.0 loaded') },
   routes: instrumentRoutes([
 
     // ── List trips ────────────────────────────────────────────────────────────
@@ -1465,6 +1524,11 @@ module.exports = definePlugin({
                 journeyId = journey?.id ?? journey?.data?.id
                 p.journeyId = journeyId || null
                 if (journeyId) p.createdRefs.push({ type: 'journey', id: journeyId })
+                // Cover goes into the gallery of the first entry created: the overview, else step 1.
+                if (journeyId && polarsteps.coverPhotoUrl) {
+                  if (/^https:\/\//i.test(String(polarsteps.coverPhotoUrl))) p.pendingCover = String(polarsteps.coverPhotoUrl)
+                  else errors.push('Cover photo: not a usable https URL')
+                }
                 if (journeyId && polarsteps.summary) {
                   try {
                     const introRes = await ctx.journal.createEntry(journeyId, {
@@ -1474,7 +1538,11 @@ module.exports = definePlugin({
                     })
                     p.journalEntries++
                     const introId = introRes?.id ?? introRes?.data?.id
-                    if (introId) p.createdRefs.push({ type: 'journalEntry', id: introId })
+                    if (introId) {
+                      p.createdRefs.push({ type: 'journalEntry', id: introId })
+                      if (p.pendingCover && await addCoverToEntry(ctx, introId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "Trip overview" entry (TREK lets plugins set a journey cover only through a linked trip, so journal-only journeys keep the default cover)'
+                      p.pendingCover = null
+                    }
                   } catch (e) { errors.push('Trip overview entry: ' + e.message) }
                 }
               } catch (e) { errors.push('Journal: ' + e.message) }
@@ -1505,6 +1573,10 @@ module.exports = definePlugin({
                   if (entryId) {
                     p.createdRefs.push({ type: 'journalEntry', id: entryId })
                     if (step.id != null) p.stepEntryIds[step.id] = entryId
+                    if (p.pendingCover) {
+                      if (await addCoverToEntry(ctx, entryId, p.pendingCover, errors)) p.coverMsg = 'Added the Polarsteps cover photo to the "' + step.name + '" entry (TREK lets plugins set a journey cover only through a linked trip, so journal-only journeys keep the default cover)'
+                      p.pendingCover = null
+                    }
                   }
                   await sleep(100)
                 } catch (e) { errors.push('Step ' + step.name + ': ' + e.message) }
@@ -1516,6 +1588,7 @@ module.exports = definePlugin({
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journal < totalSteps) msg += ' (' + (totalSteps - p.journal) + ' more queued)'
             log.push({ type: 'journal', message: msg })
+            if (p.coverMsg) log.push({ type: 'journal', message: p.coverMsg }) // log is cumulative per round
             p.done = p.journal >= totalSteps
             return { ok: true, tripId: null, log, errors, progress: p }
           }
@@ -1561,30 +1634,17 @@ module.exports = definePlugin({
 
             if (polarsteps?.uuid) await attempt(() => ctx.meta.set('trip', tripId, 'polarsteps_uuid', polarsteps.uuid))
 
-            // Import the trip's own Polarsteps cover photo, best-effort. The exact shape
-            // ctx.trips.update expects for cover_image isn't documented beyond the permission
-            // name (trip_cover_upload) — a data: URI is the closest match to how every other
-            // upload in this plugin works (ctx.files.create's content_base64) — so this is
-            // wrapped defensively and never blocks the rest of the import if the shape is wrong
-            // or the fetch fails.
+            // Use the trip's own Polarsteps cover photo, best-effort, by its CDN URL. cover_image
+            // is a string of at most 2048 chars, so the old data: URI always failed validation
+            // (#16). TREK's own cover picker stores an Unsplash pick exactly this way, as the
+            // external https URL (useTripCoverPicker.ts: update(id, {cover_image: photo.url})),
+            // and TREK's CSP allows img-src https:, so no download/upload is needed. Trade-off:
+            // the cover is hotlinked, so it disappears if Polarsteps removes the image.
+            // Only queued here: it's applied after the journey exists (see "Trip cover" below).
             if (polarsteps?.coverPhotoUrl) {
-              try {
-                // No timeout here would risk the same problem reverseGeocode() already guards
-                // against: a slow response could eat this whole round's ~6-8s budget before
-                // anything else (day rows, journal, places) even gets a chance to run.
-                const coverController = new AbortController()
-                const coverTimeout = setTimeout(() => coverController.abort(), 3000)
-                let resp
-                try {
-                  resp = await fetch(polarsteps.coverPhotoUrl, { signal: coverController.signal })
-                } finally { clearTimeout(coverTimeout) }
-                if (resp.ok) {
-                  const buf = Buffer.from(await resp.arrayBuffer())
-                  const contentType = resp.headers.get('content-type') || 'image/jpeg'
-                  await ctx.trips.update(tripId, { cover_image: 'data:' + contentType + ';base64,' + buf.toString('base64') })
-                  log.push({ type: 'trip', message: 'Imported trip cover photo from Polarsteps' })
-                }
-              } catch (e) { errors.push('Cover photo: ' + e.message) }
+              const coverUrl = String(polarsteps.coverPhotoUrl)
+              if (/^https:\/\//i.test(coverUrl) && coverUrl.length <= 2048) p.pendingCover = coverUrl
+              else errors.push('Cover photo: not a usable https URL')
             }
           }
 
@@ -1738,6 +1798,16 @@ module.exports = definePlugin({
               // Only relevant when journalActive — a places-only import has no journey at all.
               let journeyId = p.journeyId
               if (journalActive && !journeyId) {
+                // Store the cover in TREK first, so the journey created next inherits a cover
+                // it can display (see storeCoverInTrek()). On failure p.pendingCover keeps the
+                // URL, which is set on the trip after the journey exists, as before.
+                if (p.pendingCover) {
+                  const stored = await storeCoverInTrek(ctx, tripId, p.pendingCover, polarsteps.startDate, errors)
+                  if (stored) {
+                    p.pendingCover = null
+                    log.push({ type: 'trip', message: 'Set trip and journey cover photo from Polarsteps' })
+                  }
+                }
                 const journey = await ctx.journal.createJourney({
                   title: polarsteps.name,
                   subtitle: polarsteps.totalKm ? polarsteps.totalKm.toLocaleString() + ' km travelled' : null,
@@ -1884,6 +1954,21 @@ module.exports = definePlugin({
               }
             } catch (e) { errors.push('Journal: ' + e.message) }
           }
+
+          // ── Trip cover, set only once the journey exists ───────────────────
+          // createJourney copies the first linked trip's cover onto the journey, stripping a
+          // leading /uploads/ (TREK journey-domain.service.ts), and the journey page renders it
+          // as /uploads/<value>. An external https cover therefore breaks the journey's cover,
+          // so it goes on the trip after the journey is created; the journey keeps TREK's
+          // default look instead. The SDK has no way to update a journey's own cover.
+          if (p.pendingCover) {
+            try {
+              await ctx.trips.update(tripId, { cover_image: p.pendingCover })
+              log.push({ type: 'trip', message: 'Set trip cover photo from Polarsteps' })
+            } catch (e) { errors.push('Cover photo: ' + e.message) }
+            p.pendingCover = null
+          }
+
           if (journalActive) {
             let msg = 'Created journal with ' + p.journalEntries + ' entries'
             if (p.journalDayNotes) msg += ', ' + p.journalDayNotes + ' day notes'
