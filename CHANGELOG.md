@@ -2,6 +2,16 @@
 
 All notable changes to the Trip Importer TREK plugin are documented here.
 
+## [1.7.3] - 2026-11-26
+
+### Fixed
+- **Polarsteps trip cover never appeared** (#16). The cover was sent as a base64 data URI, but TREK limits `cover_image` to 2048 characters, so every import logged `Cover photo: BAD_PARAMS … Too big`. The cover is now set by its Polarsteps `https://` URL, the same way TREK's own cover picker stores an Unsplash pick. Nothing is downloaded or uploaded. The cover is hotlinked, so it disappears if Polarsteps removes the image.
+- **Covers hosted on `media.prod.polarsteps.com` were blocked by egress** (#15, PR #18).
+- **Large multi-trip ZIP exports silently lost step photos** past fixed caps of 300 generic and 500 step photos (#17, PR #20). The caps are now 2000 and 5000.
+
+### Added
+- `/import` smoke tests for the resumable, paginated import loop (PR #22).
+
 ## [1.7.2] - 2026-11-26
 
 ### Fixed
